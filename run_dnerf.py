@@ -14,6 +14,12 @@ try:
 except ImportError:
     pass
 
+import commentjson as json
+import tinycudann as tcnn
+
+with open("data/config_hash.json") as f:
+	config = json.load(f)
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
@@ -49,7 +55,9 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
 
     # embed position
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
+    print('\nInputs flat: ', inputs_flat.shape)
     embedded = embed_fn(inputs_flat)
+    print('Embedded input: ', embedded.shape)
 
     # embed time
     if embd_time_discr:
@@ -57,6 +65,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         input_frame_time = frame_time[:, None].expand([B, N, 1])
         input_frame_time_flat = torch.reshape(input_frame_time, [-1, 1])
         embedded_time = embedtime_fn(input_frame_time_flat)
+        print('Embedded time: ', embedded_time.shape)
         embedded_times = [embedded_time, embedded_time]
 
     else:
@@ -67,9 +76,13 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
+        print('Embedded dirs: ', embedded_dirs.shape)
         embedded = torch.cat([embedded, embedded_dirs], -1)
+        print('Embedded cat: ', embedded.shape)
 
+    input('\nEncoded all input...')
     outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_times)
+    print('\nOutput shapes: ', outputs_flat.shape, ' ', position_delta_flat.shape)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
     return outputs, position_delta
@@ -88,7 +101,6 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
 
     all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
     return all_ret
-
 
 def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1., frame_time=None,
@@ -204,14 +216,20 @@ def render_path(render_poses, render_times, hwf, chunk, render_kwargs, gt_imgs=N
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
-    embed_fn, input_ch = get_embedder(args.multires, 3, args.i_embed)
+    input_ch = 32
+    #embed_fn, input_ch = get_embedder(args.multires, 3, args.i_embed)
+    print('\ninput_ch: ', input_ch)
+    embed_fn = tcnn.Encoding(3, config["encoding"])  
     embedtime_fn, input_ch_time = get_embedder(args.multires, 1, args.i_embed)
+    print('\ninput_ch_time: ', input_ch_time)
 
-    input_ch_views = 0
+    input_ch_views = 32
     embeddirs_fn = None
     if args.use_viewdirs:
-        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, 3, args.i_embed)
-
+        #embeddirs_fn, input_ch_views = get_embedder(args.multires_views, 3, args.i_embed)
+        print('\ninput_ch_views: ', input_ch_views)
+        embeddirs_fn = tcnn.Encoding(3, config["encoding"])
+    
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
     model = NeRF.get_by_name(args.nerf_type, D=args.netdepth, W=args.netwidth,
@@ -252,7 +270,7 @@ def create_nerf(args):
     expname = args.expname
 
     ##########################
-
+#region checkpoints
     # Load checkpoints
     if args.ft_path is not None and args.ft_path!='None':
         ckpts = [args.ft_path]
@@ -274,7 +292,7 @@ def create_nerf(args):
             model_fine.load_state_dict(ckpt['network_fine_state_dict'])
         if args.do_half_precision:
             amp.load_state_dict(ckpt['amp'])
-
+#endregion
     ##########################
 
     render_kwargs_train = {
@@ -432,16 +450,19 @@ def render_rays(ray_batch,
 
 
         if N_importance <= 0:
+            # not executed in mutant ex.
             raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
             rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
         else:
             if use_two_models_for_fine:
+                # not executed in mutant ex.
                 raw, position_delta_0 = network_query_fn(pts, viewdirs, frame_time, network_fn)
                 rgb_map_0, disp_map_0, acc_map_0, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
             else:
                 with torch.no_grad():
+                    # Run coarse network
                     raw, _ = network_query_fn(pts, viewdirs, frame_time, network_fn)
                     _, _, _, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
@@ -452,6 +473,7 @@ def render_rays(ray_batch,
 
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
     run_fn = network_fn if network_fine is None else network_fine
+    # Run fine network
     raw, position_delta = network_query_fn(pts, viewdirs, frame_time, run_fn)
     rgb_map, disp_map, acc_map, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
@@ -607,7 +629,7 @@ def config_parser():
     return parser
 
 
-def train():
+def train(): # python run_dnerf.py --config configs/mutant.txt
 
     parser = config_parser()
     args = parser.parse_args()
@@ -615,10 +637,26 @@ def train():
     # Load data
 
     if args.dataset_type == 'blender':
+        # images        = training, validation, test images
+        # poses         = corresponding transformation matrices <-- origin and viewdir of camera
+        # times         = timestamps (time of capture)
+        # render_poses  = transformation matrices for novel view synthesis
+        # render_times  = timestamps for novel view synthesis
+        # hwf           = height, width, focal length
+        # i_split       = number of training, validation and test examples
         images, poses, times, render_poses, render_times, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
-        print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
+        
+        #print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
+        print('\nimages: ', type(images), images.shape, '\nposes: ', type(poses), poses.shape,
+              '\ntimes: ', type(times), times.shape, '\nrender_poses: ', type(render_poses), render_poses.shape,
+              '\nrender_times: ', type(render_times), render_times.shape,
+              '\nheight: ', hwf[0], ' width: ', hwf[1], ' focal: ', hwf[2],
+              '\ni_train: ', i_split[0].shape, ' i_val: ', i_split[1].shape, ' i_test: ', i_split[2].shape)
+        input('\nLoaded blender. Press Enter to continue..')
+        
         i_train, i_val, i_test = i_split
-
+        
+        # near and far plane
         near = 2.
         far = 6.
 
@@ -661,8 +699,13 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create nerf model
+    # select embedder (eg. positional encoding..)
+    # create coarse network (network_fn in render_kwargs_train)
+    # create fine network (network_fine in render_kwargs_train)
+    # select optimizer (eg. Adam..)
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
     global_step = start
+    print('\nCreated nerf model. Press Enter to continue..')
 
     bds_dict = {
         'near' : near,
@@ -723,14 +766,16 @@ def train():
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
+    iterations = int(input('\nInput no. of iterations: '))
+    #N_iters = args.N_iter + 1
+    N_iters = iterations + 1
 
-    N_iters = args.N_iter + 1
-    print('Begin')
+    print('\nBegin')
 
     # Summary writers
     writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
     
-    start = start + 1
+    start = start + 1 # set start to 1
     for i in trange(start, N_iters):
         time0 = time.time()
 
@@ -752,6 +797,7 @@ def train():
 
         else:
             # Random from one image
+            # img_i = selected training example
             if i >= args.precrop_iters_time:
                 img_i = np.random.choice(i_train)
             else:
@@ -759,32 +805,38 @@ def train():
                 max_sample = max(int(skip_factor), 3)
                 img_i = np.random.choice(i_train[:max_sample])
 
+            #target     = comparison for predicted RGB colors for selected training example img_i
+            #pose       = transformation matrix of selected training example (first 3 quadruples)
+            #frame_time = timestamp of selected training example
             target = images[img_i]
             pose = poses[img_i, :3, :4]
             frame_time = times[img_i]
-
             if N_rand is not None:
+                #get rays origins, and directions from hwf and camera position
                 rays_o, rays_d = get_rays(H, W, focal, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
-
+                
+                # Center cropping by precrop_frac until precrop_iters
                 if i < args.precrop_iters:
                     dH = int(H//2 * args.precrop_frac)
                     dW = int(W//2 * args.precrop_frac)
                     coords = torch.stack(
-                        torch.meshgrid(
-                            torch.linspace(H//2 - dH, H//2 + dH - 1, 2*dH), 
-                            torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW)
-                        ), -1)
+                             torch.meshgrid(
+                             torch.linspace(H//2 - dH, H//2 + dH - 1, 2*dH), 
+                             torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW)
+                             ), -1)
                     if i == start:
                         print(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")                
                 else:
                     coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
 
-                coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
-                select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,)
-                select_coords = coords[select_inds].long()  # (N_rand, 2)
+                # Select N_rand rays and concatenate to 'batch_rays' as (2, N_rand, 3) with (type(origin/direction), indice, coordinate)
+                # aswell as target RGB in 'target_s' (indice, RGB)
+                coords = torch.reshape(coords, [-1,2])  # (H * W, 2) eg. 16000 * [x y]
+                select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,) eg. 500 indices
+                select_coords = coords[select_inds].long()  # (N_rand, 2) eg. 500 * [x y]
                 rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-                batch_rays = torch.stack([rays_o, rays_d], 0)
+                batch_rays = torch.stack([rays_o, rays_d], 0) # (2, N_rand, 3)
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####

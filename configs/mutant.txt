@@ -18,10 +18,9 @@ N_importance = 128
 N_rand = 500
 testskip = 1
 
-precrop_iters = 500
+precrop_iters = 0
 precrop_iters_time = 100000
 precrop_frac = 0.5
 
 half_res = True
 do_half_precision = False
-

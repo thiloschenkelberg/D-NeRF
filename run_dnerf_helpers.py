@@ -25,6 +25,7 @@ class Embedder:
         if self.kwargs['include_input']:
             embed_fns.append(lambda x : x)
             out_dim += d
+            #print('\noutdim: ', out_dim)
             
         max_freq = self.kwargs['max_freq_log2']
         N_freqs = self.kwargs['num_freqs']
@@ -38,6 +39,7 @@ class Embedder:
             for p_fn in self.kwargs['periodic_fns']:
                 embed_fns.append(lambda x, p_fn=p_fn, freq=freq : p_fn(x * freq))
                 out_dim += d
+                #print('\noutdim: ', out_dim)
                     
         self.embed_fns = embed_fns
         self.out_dim = out_dim
@@ -47,6 +49,7 @@ class Embedder:
 
 
 def get_embedder(multires, input_dims, i=0):
+    #print('\ncreating embedder')
     if i == -1:
         return nn.Identity(), input_dims
     
@@ -110,6 +113,7 @@ class DirectTemporalNeRF(nn.Module):
 
         return net_final(h)
 
+    # relevant usage of network with pts and time input
     def forward(self, x, ts):
         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
         t = ts[0]
