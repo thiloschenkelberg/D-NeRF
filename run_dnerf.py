@@ -80,7 +80,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         embedded = torch.cat([embedded, embedded_dirs], -1)
         print('Embedded cat: ', embedded.shape)
 
-    input('\nEncoded all input...')
+    input('\nEncoded all input... Batchifying next.')
     outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_times)
     print('\nOutput shapes: ', outputs_flat.shape, ' ', position_delta_flat.shape)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
