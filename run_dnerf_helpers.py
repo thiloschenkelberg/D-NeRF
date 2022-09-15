@@ -104,7 +104,7 @@ class FastTemporalNerf():
         input_pts, input_views = torch.split(x, [self.input_ch_pos,self.input_ch_view], dim=-1)
         assert len(torch.unique(t[:, :1])) == 1, "Only accepts all points from same time"
         cur_time = t[0, 0]
-        if cur_time == 1. and self.zero_canonical:
+        if cur_time == 0. and self.zero_canonical:
             dx = torch.zeros_like(input_pts[:,:3])
         else:
             input_dx = torch.cat([input_pts, t], dim=-1)
