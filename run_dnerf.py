@@ -32,8 +32,6 @@ def batchify(fn, chunk):
         return fn
     def ret(inputs_pts, input_time):
         num_batches = inputs_pts.shape[0]
-        #print('\nNum batches: ', num_batches)
-
         out_list = []
         dx_list = []
         for i in range(0, num_batches, chunk):
@@ -848,6 +846,7 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
     # Summary writers
     writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
     
+    # Start of training loop
     start = start + 1 # set start to 1
     for i in trange(start, N_iters):
         time0 = time.time()
@@ -885,10 +884,12 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
             pose = poses[img_i, :3, :4]
             frame_time = times[img_i]
             if N_rand is not None:
-                #get rays origins, and directions from hwf and camera position
+                #get H x W ray origins, and directions from height, width, focal and camera position
+                #c2w (camera to world) transformation
                 rays_o, rays_d = get_rays(H, W, focal, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
                 
-                # Center cropping by precrop_frac until precrop_iters
+                # Get img plane coordinates -> eg. 400x400 (H x W) coords grid for same resolution training example
+                # Center cropping by precrop_frac until precrop_iters <- focus early iterations on center of scene
                 if i < args.precrop_iters:
                     dH = int(H//2 * args.precrop_frac)
                     dW = int(W//2 * args.precrop_frac)
@@ -902,7 +903,8 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
                 else:
                     coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
 
-                # Select N_rand rays and concatenate to 'batch_rays' as (2, N_rand, 3) with (type(origin/direction), indice, coordinate)
+                # Select N_rand ray origins and directions and concatenate to 'batch_rays'
+                # (2, N_rand, 3) with (type(origin/direction), indice, coordinate)
                 # aswell as target RGB in 'target_s' (indice, RGB)
                 coords = torch.reshape(coords, [-1,2])  # (H * W, 2) eg. 16000 * [x y]
                 select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,) eg. 500 indices
@@ -913,6 +915,19 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
+        # render_kwargs_train:
+        #   network_query_fn
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
         rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays, frame_time=frame_time,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
