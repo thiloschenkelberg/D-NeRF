@@ -30,18 +30,18 @@ def batchify(fn, chunk):
     """
     if chunk is None:
         return fn
-    def ret(inputs_pos, inputs_time):
-        num_batches = inputs_pos.shape[0]
+    def ret(inputs_pts, input_time):
+        num_batches = inputs_pts.shape[0]
+        #print('\nNum batches: ', num_batches)
 
         out_list = []
         dx_list = []
         for i in range(0, num_batches, chunk):
-            out, dx = fn(inputs_pos[i:i+chunk], [inputs_time[0][i:i+chunk], inputs_time[1][i:i+chunk]])
+            out,dx = fn(inputs_pts[i:i+chunk], input_time[i:i+chunk])
             out_list += [out]
             dx_list += [dx]
         return torch.cat(out_list, 0), torch.cat(dx_list, 0)
     return ret
-
 
 def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=1024*64,
                 embd_time_discr=True):
@@ -55,18 +55,20 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
 
     # embed position
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
-    print('\nInputs flat: ', inputs_flat.shape)
     embedded = embed_fn(inputs_flat)
-    print('Embedded input: ', embedded.shape)
+    #print('Embedded input: ', embedded.shape)
 
     # embed time
     if embd_time_discr:
+        #print('\nInput shape: ', inputs.shape)
         B, N, _ = inputs.shape
+        #print('\nB: ', B, ' N: ', N)
         input_frame_time = frame_time[:, None].expand([B, N, 1])
+        #print('\nInput_frame_time shape: ', input_frame_time.shape)
         input_frame_time_flat = torch.reshape(input_frame_time, [-1, 1])
+        #print('\nInput_frame_time_flat shape: ', input_frame_time_flat.shape)
         embedded_time = embedtime_fn(input_frame_time_flat)
-        print('Embedded time: ', embedded_time.shape)
-        embedded_times = [embedded_time, embedded_time]
+        #print('Embedded time: ', embedded_time.shape)
 
     else:
         assert NotImplementedError
@@ -76,17 +78,36 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
-        print('Embedded dirs: ', embedded_dirs.shape)
+        #print('Embedded dirs: ', embedded_dirs.shape)
         embedded = torch.cat([embedded, embedded_dirs], -1)
-        print('Embedded cat: ', embedded.shape)
+        #print('Embedded cat: ', embedded.shape)
 
-    input('\nEncoded all input... Batchifying next.')
-    outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_times)
-    print('\nOutput shapes: ', outputs_flat.shape, ' ', position_delta_flat.shape)
+    #input('\nEncoded all input... Batchifying next.')
+    outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_time)
+    #print('\nOutput shapes: ', outputs_flat.shape, ' ', position_delta_flat.shape)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
     return outputs, position_delta
 
+def run_tcnn_network(inputs, viewdirs, frame_time, fn,
+                     netchunk=1024*64):
+    assert len(torch.unique(frame_time)) == 1, "Only accepts all points from same time"
+    
+    # Flatten inputs from (N_rays,Samples,Coords) -> (Indice,Coords)
+    input_pts_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
+    input_views_temp = viewdirs[:,None].expand(inputs.shape)
+    input_views_flat = torch.reshape(input_views_temp, [-1, viewdirs.shape[-1]])
+    inputs_flat = torch.cat([input_pts_flat, input_views_flat], -1)
+    
+    # Flatten frame times from (N_rays,Samples,Time) -> (Indice,Time)
+    B, N, _ = inputs.shape
+    input_frame_time = frame_time[:, None].expand([B,N,1])
+    input_frame_time_flat = torch.reshape(input_frame_time, [-1,1])
+    
+    outputs_flat, position_delta_flat = batchify(fn, netchunk)(inputs_flat, input_frame_time_flat)
+    outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
+    position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
+    return outputs, position_delta
 
 def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
@@ -212,24 +233,51 @@ def render_path(render_poses, render_times, hwf, chunk, render_kwargs, gt_imgs=N
 
     return rgbs, disps
 
+def create_tcnn_nerf(args):
+    model = NeRF.get_by_name(args.nerf_type)
+    assert type(model) == FastTemporalNerf, "Wrong nerf type in args."
+    grad_vars_dx, grad_vars_rgb = model.parameters()
+    
+    network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_tcnn_network(inputs, viewdirs, ts, network_fn,
+                                                                                  netchunk=args.netchunk)
+
+    optimizer = torch.optim.Adam(grad_vars_dx + grad_vars_rgb, lr=args.lrate, betas=(0.9, 0.999))
+
+    start = 0
+    
+    render_kwargs_train = {
+        'network_query_fn' : network_query_fn,
+        'perturb' : args.perturb,
+        'N_importance' : args.N_importance,
+        'N_samples' : args.N_samples,
+        'network_fn' : model,
+        'use_viewdirs' : args.use_viewdirs,
+        'white_bkgd' : args.white_bkgd,
+        'raw_noise_std' : args.raw_noise_std,
+        'use_two_models_for_fine' : args.use_two_models_for_fine,
+    }
+
+    render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
+    render_kwargs_test['perturb'] = False
+    render_kwargs_test['raw_noise_std'] = 0.
+
+    return render_kwargs_train, render_kwargs_test, start, optimizer
 
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
-    input_ch = 32
-    #embed_fn, input_ch = get_embedder(args.multires, 3, args.i_embed)
-    print('\ninput_ch: ', input_ch)
-    embed_fn = tcnn.Encoding(3, config["encoding"])  
+    # Create embedder based on resolution (lvl of frequency encoding)
+    # set no. of input dimensions
+    # write no. of output dimensions to _ch
+    embed_fn, input_ch = get_embedder(args.multires, 3, args.i_embed)
     embedtime_fn, input_ch_time = get_embedder(args.multires, 1, args.i_embed)
-    print('\ninput_ch_time: ', input_ch_time)
-
-    input_ch_views = 32
+    input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
-        #embeddirs_fn, input_ch_views = get_embedder(args.multires_views, 3, args.i_embed)
-        print('\ninput_ch_views: ', input_ch_views)
-        embeddirs_fn = tcnn.Encoding(3, config["encoding"])
+        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, 3, args.i_embed)
     
+    
+    # Create original or direct temporal NeRF (args.nerf_type)
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
     model = NeRF.get_by_name(args.nerf_type, D=args.netdepth, W=args.netwidth,
@@ -239,6 +287,8 @@ def create_nerf(args):
                  zero_canonical=not args.not_zero_canonical).to(device)
     grad_vars = list(model.parameters())
 
+    #region Fine model (not used in example)
+    '''
     model_fine = None
     if args.use_two_models_for_fine:
         model_fine = NeRF.get_by_name(args.nerf_type, D=args.netdepth_fine, W=args.netwidth_fine,
@@ -247,30 +297,41 @@ def create_nerf(args):
                           use_viewdirs=args.use_viewdirs, embed_fn=embed_fn,
                           zero_canonical=not args.not_zero_canonical).to(device)
         grad_vars += list(model_fine.parameters())
+    '''
+    #endregion
 
+    # shortcut for run_network function that takes inputs, viewdirs, times and the network
     network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_network(inputs, viewdirs, ts, network_fn,
                                                                 embed_fn=embed_fn,
                                                                 embeddirs_fn=embeddirs_fn,
                                                                 embedtime_fn=embedtime_fn,
                                                                 netchunk=args.netchunk,
                                                                 embd_time_discr=args.nerf_type!="temporal")
+    
+    # network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_tcnn_network(inputs, viewdirs, ts, network_fn,
+    #                                                                               netchunk=args.netchunk)
 
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
+    #region Half precision (not used in example)
+    '''
     if args.do_half_precision:
         print("Run model at half precision")
         if model_fine is not None:
             [model, model_fine], optimizers = amp.initialize([model, model_fine], optimizer, opt_level='O1')
         else:
             model, optimizers = amp.initialize(model, optimizer, opt_level='O1')
+    '''
+    #endregion
 
     start = 0
     basedir = args.basedir
     expname = args.expname
 
     ##########################
-#region checkpoints
+    #region checkpoints (not available atm)
+    '''
     # Load checkpoints
     if args.ft_path is not None and args.ft_path!='None':
         ckpts = [args.ft_path]
@@ -292,6 +353,7 @@ def create_nerf(args):
             model_fine.load_state_dict(ckpt['network_fine_state_dict'])
         if args.do_half_precision:
             amp.load_state_dict(ckpt['amp'])
+    '''
 #endregion
     ##########################
 
@@ -299,7 +361,6 @@ def create_nerf(args):
         'network_query_fn' : network_query_fn,
         'perturb' : args.perturb,
         'N_importance' : args.N_importance,
-        'network_fine': model_fine,
         'N_samples' : args.N_samples,
         'network_fn' : model,
         'use_viewdirs' : args.use_viewdirs,
@@ -308,10 +369,12 @@ def create_nerf(args):
         'use_two_models_for_fine' : args.use_two_models_for_fine,
     }
 
+    #region NDC LLFF (not used)
     # NDC only good for LLFF-style forward facing data
     if args.dataset_type != 'llff' or args.no_ndc:
         render_kwargs_train['ndc'] = False
         render_kwargs_train['lindisp'] = args.lindisp
+    #endregion
 
     render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
     render_kwargs_test['perturb'] = False
@@ -414,6 +477,7 @@ def render_rays(ray_batch,
     """
 
     N_rays = ray_batch.shape[0]
+    #print('\nNumber of rays: ',N_rays)
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 9 else None
     bounds = torch.reshape(ray_batch[...,6:9], [-1,1,3])
@@ -448,7 +512,6 @@ def render_rays(ray_batch,
 
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
-
         if N_importance <= 0:
             # not executed in mutant ex.
             raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
@@ -462,7 +525,6 @@ def render_rays(ray_batch,
 
             else:
                 with torch.no_grad():
-                    # Run coarse network
                     raw, _ = network_query_fn(pts, viewdirs, frame_time, network_fn)
                     _, _, _, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
@@ -473,7 +535,6 @@ def render_rays(ray_batch,
 
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
     run_fn = network_fn if network_fine is None else network_fine
-    # Run fine network
     raw, position_delta = network_query_fn(pts, viewdirs, frame_time, run_fn)
     rgb_map, disp_map, acc_map, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
@@ -534,9 +595,9 @@ def config_parser():
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
-    parser.add_argument("--chunk", type=int, default=1024*32, 
+    parser.add_argument("--chunk", type=int, default=512*32, 
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024*64, 
+    parser.add_argument("--netchunk", type=int, default=512*64, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true', 
                         help='only take random rays from 1 image at a time')
@@ -615,13 +676,13 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
-    parser.add_argument("--i_print",   type=int, default=1000,
+    parser.add_argument("--i_print",   type=int, default=100,
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=10000,
+    parser.add_argument("--i_img",     type=int, default=100,
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=100000,
+    parser.add_argument("--i_weights", type=int, default=100,
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=200000,
+    parser.add_argument("--i_testset", type=int, default=100,
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=200000,
                         help='frequency of render_poses video saving')
@@ -698,12 +759,24 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
         with open(f, 'w') as file:
             file.write(open(args.config, 'r').read())
 
-    # Create nerf model
+    # Create nerf/temporal nerf model
     # select embedder (eg. positional encoding..)
     # create coarse network (network_fn in render_kwargs_train)
     # create fine network (network_fine in render_kwargs_train)
     # select optimizer (eg. Adam..)
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    #
+    # Create tcnn_nerf
+    # Grid encoding spatial coordinates
+    # Spherical harmonics encoding viewdirs
+    # Frequency encoding time
+    # return optimizer
+    if args.nerf_type == "fast_temporal":
+        render_kwargs_train, render_kwargs_test, start, optimizer = create_tcnn_nerf(args)
+    else:
+        render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    assert render_kwargs_train is not None, "Creating nerf failed."
+        
+
     global_step = start
     print('\nCreated nerf model. Press Enter to continue..')
 
@@ -844,6 +917,7 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
+        #region TV Loss (inactive)
         if args.add_tv_loss:
             frame_time_prev = times[img_i - 1] if img_i > 0 else None
             frame_time_next = times[img_i + 1] if img_i < times.shape[0] - 1 else None
@@ -865,11 +939,13 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
                 _, _, _, extras_next = render(H, W, focal, chunk=args.chunk, rays=batch_rays, frame_time=rand_time_next,
                                                 verbose=i < 10, retraw=True, z_vals=extras['z_vals'].detach(),
                                                 **render_kwargs_train)
+        #endregion
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
 
         tv_loss = 0
+        #region TV Loss (inactive)
         if args.add_tv_loss:
             if frame_time_prev is not None:
                 tv_loss += ((extras['position_delta'] - extras_prev['position_delta']).pow(2)).sum()
@@ -880,6 +956,7 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
                 if 'position_delta_0' in extras:
                     tv_loss += ((extras['position_delta_0'] - extras_next['position_delta_0']).pow(2)).sum()
             tv_loss = tv_loss * args.tv_loss_weight
+        #endregion
 
         loss = img_loss + tv_loss
         psnr = mse2psnr(img_loss)

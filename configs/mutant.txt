@@ -3,7 +3,7 @@ basedir = ./logs
 datadir = ./data/mutant
 dataset_type = blender
 
-nerf_type = direct_temporal
+nerf_type = fast_temporal
 no_batching = True
 not_zero_canonical = False
 use_viewdirs = True
