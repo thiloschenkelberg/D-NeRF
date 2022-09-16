@@ -177,6 +177,7 @@ class DirectTemporalNeRF(nn.Module):
 
     def query_time(self, new_pts, t, net, net_final):
         h = torch.cat([new_pts, t], dim=-1)
+        # net (8, input_ch + input_ch_time, 3)
         for i, l in enumerate(net):
             h = net[i](h)
             h = F.relu(h)
@@ -262,21 +263,26 @@ class NeRFOriginal(nn.Module):
     def forward(self, x, ts):
         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
         h = input_pts
+        # 8 layers (input_ch, 256)
         for i, l in enumerate(self.pts_linears):
             h = self.pts_linears[i](h)
             h = F.relu(h)
             if i in self.skips:
                 h = torch.cat([input_pts, h], -1)
 
+        # alpha_linear (1, 256, 1)
+        # feature_linear (1, 256, 256)
         if self.use_viewdirs:
             alpha = self.alpha_linear(h)
             feature = self.feature_linear(h)
             h = torch.cat([feature, input_views], -1)
 
+            # views_linears (1, input_ch_views + 256, 128)
             for i, l in enumerate(self.views_linears):
                 h = self.views_linears[i](h)
                 h = F.relu(h)
 
+            # rgb_linear (1, 128, output_color_ch)
             rgb = self.rgb_linear(h)
             outputs = torch.cat([rgb, alpha], -1)
         else:
