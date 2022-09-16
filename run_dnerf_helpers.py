@@ -75,7 +75,7 @@ class FastTemporalNerf():
                  zero_canonical=True,
                  debug=False):
         # Read tcnn config file
-        with open("data/config_hash.json") as f:
+        with open("configs/_config_tcnn.json") as f:
             self.config=json.load(f)
         self.input_ch_pos=input_ch_pts
         self.input_ch_view=input_ch_view
@@ -336,7 +336,7 @@ def hsv_to_rgb(h, s, v):
 
 # Ray helpers
 def get_rays(H, W, focal, c2w):
-    i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))  # pytorch's meshgrid has indexing='ij'
+    i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H), indexing='ij')  # pytorch's meshgrid has indexing='ij'
     i = i.t()
     j = j.t()
     dirs = torch.stack([(i-W*.5)/focal, -(j-H*.5)/focal, -torch.ones_like(i)], -1)

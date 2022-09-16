@@ -14,12 +14,6 @@ try:
 except ImportError:
     pass
 
-import commentjson as json
-import tinycudann as tcnn
-
-with open("data/config_hash.json") as f:
-	config = json.load(f)
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
@@ -917,12 +911,13 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
                     coords = torch.stack(
                              torch.meshgrid(
                              torch.linspace(H//2 - dH, H//2 + dH - 1, 2*dH), 
-                             torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW)
+                             torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW),
+                             indexing='ij'
                              ), -1)
                     if i == start and DEBUG:
                         print(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")                
                 else:
-                    coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
+                    coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W), indexing='ij'), -1)  # (H, W, 2)
 
                 # Select N_rand ray origins and directions and concatenate to 'batch_rays'
                 # (2, N_rand, 3) with (type(origin/direction), indice, coordinate)
