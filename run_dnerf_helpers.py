@@ -8,15 +8,12 @@ from torchsearchsorted import searchsorted
 import commentjson as json
 import tinycudann as tcnn
 
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 # Misc
 img2mse = lambda x, y : torch.mean((x - y) ** 2)
 mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
-
 
 # Positional encoding (section 5.1)
 class Embedder:
@@ -75,43 +72,69 @@ def get_embedder(multires, input_dims, i=0):
 class FastTemporalNerf():
     def __init__(self, input_ch_pts=3, input_ch_view=3, input_ch_time=1,
                  output_ch_dx=3, output_ch_rgb=4,
-                 zero_canonical=True):
+                 zero_canonical=True,
+                 debug=False):
+        # Read tcnn config file
         with open("data/config_hash.json") as f:
-            self.config = json.load(f)
+            self.config=json.load(f)
         self.input_ch_pos=input_ch_pts
         self.input_ch_view=input_ch_view
         self.input_ch_time=input_ch_time
         self.output_ch_dx=output_ch_dx
         self.output_ch_rgb=output_ch_rgb
         self.zero_canonical=zero_canonical
-        self.dxModel = self.create_dx_model()
-        self.rgbModel = self.create_rgb_model()
-        
+        self.dxModel=self.create_dx_model()
+        self.rgbModel=self.create_rgb_model()
+        self.debug=debug
+    
+    # Create model learning positional delta
     def create_dx_model(self):
         return tcnn.NetworkWithInputEncoding(self.input_ch_pos+self.input_ch_time,
                                              self.output_ch_dx,
                                              self.config["input_dx_encoding"],
                                              self.config['cutlass'])
+    # Create model learning color and density
     def create_rgb_model(self):
         return tcnn.NetworkWithInputEncoding(self.input_ch_pos+self.input_ch_view,
                                              self.output_ch_rgb,
                                              self.config["input_rgb_encoding"],
                                              self.config['cutlass'])
+    # Return  parameter lists for both models
     def parameters(self):
         return list(self.dxModel.parameters()), list(self.rgbModel.parameters())
     
+    # Forward propagation
     def forward(self, x, t):
+        # Split concatenated inputs x back to pts and views
         input_pts, input_views = torch.split(x, [self.input_ch_pos,self.input_ch_view], dim=-1)
-        assert len(torch.unique(t[:, :1])) == 1, "Only accepts all points from same time"
+        assert len(torch.unique(t)) == 1, "Only accepts all points from same time"
+        
         cur_time = t[0, 0]
         if cur_time == 0. and self.zero_canonical:
-            dx = torch.zeros_like(input_pts[:,:3])
+            # No positional delta at t = 0
+            # if canonical space is also at t = 0
+            dx = torch.zeros_like(input_pts)
         else:
+            # Concatenate pts with time to input to dxModel
             input_dx = torch.cat([input_pts, t], dim=-1)
+            # Use dxModel
             dx = self.dxModel(input_dx)
-            input_pts_orig = input_pts[:, :3]
-            input_rgb = torch.cat([(input_pts_orig + dx), input_views], dim=-1)
+            # Add positional delta dx to pts
+            input_pts = input_pts + dx
+        # Concatenate pts with views to input to rgbModel
+        input_rgb = torch.cat([input_pts, input_views], dim=-1)
+        # Use rgbModel
         out = self.rgbModel(input_rgb)
+        
+        if self.debug:
+            print('\nforward()\ninput_pts shape: ', input_pts.shape,
+                  '\ninput_views shape: ', input_views.shape,
+                  '\ninput_pts shape: ', input_pts.shape)
+            if cur_time != 0. and self.zero_canonical:
+                print('input_dx shape: ', input_dx.shape)
+            else:
+                print('cur_time is 0.')
+        
         return out,dx
 
     __call__ = forward
