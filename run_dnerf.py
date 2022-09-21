@@ -136,18 +136,13 @@ def create_tcnn_nerf(args):
     print('\nDebug: ', DEBUG)
     model = NeRF.get_by_name(args.nerf_type, debug=DEBUG)
     assert type(model) == FastTemporalNerf, "Wrong nerf type in args."
-    # Get dx and rgb model parameters
-    grad_vars = model.get_parameters()
+    # Get Adam optimizer with individual param_groups
+    optimizer = model.get_optimizer()
     
     # Build network shortcut lambda function
     # really only shortcuts passing of netchunk size, but is consistent with original implementation
     network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_tcnn_network(inputs, viewdirs, ts, network_fn,
                                                                                   netchunk=args.netchunk)
-
-    # Create Adam optimizer for combined model parameters
-    optimizer = torch.optim.Adam(grad_vars, lr=args.lrate, betas=(0.9, 0.999))
-    print(len(optimizer.params))
-    input('stop')
 
     start = 0
     
@@ -603,7 +598,7 @@ def config_parser():
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--do_half_precision", action='store_true',
                         help='do half precision training and inference')
-    parser.add_argument("--lrate", type=float, default=5e-4, 
+    parser.add_argument("--lrate", type=float, default=1e-5, 
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
@@ -690,13 +685,13 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
-    parser.add_argument("--i_print",   type=int, default=100,
+    parser.add_argument("--i_print",   type=int, default=5,
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=500,
+    parser.add_argument("--i_img",     type=int, default=1000,
                         help='frequency of tensorboard image logging')
     parser.add_argument("--i_weights", type=int, default=10000,
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=500,
+    parser.add_argument("--i_testset", type=int, default=1000,
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=200000,
                         help='frequency of render_poses video saving')
@@ -900,6 +895,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
                 max_sample = max(int(skip_factor), 3)
                 img_i = np.random.choice(i_train[:max_sample])
             tr_ex = img_i
+            #img_i =0
 
             #target     = comparison for predicted RGB colors for selected training example img_i
             #pose       = transformation matrix of selected training example (first 3 quadruples)

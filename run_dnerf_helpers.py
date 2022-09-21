@@ -88,33 +88,32 @@ class FastTemporalNerf():
         self.output_ch_rgb=output_ch_rgb
         self.zero_canonical=zero_canonical
         self.debug=debug
-        self.dx_net, self.alpha_net, self.rgb_net = self.create_model()
+        self.dx_net, self.alpha_net, self.rgb_net, self.grid_encode = self.create_model()
         #self.dx_net, self.alpha_net, self.rgb_net = self.create_model_separate()
     
     # Create model with dx_, alpha_, and rgb_net
     def create_model(self):
-        # #
-        # # todo join grid encodings!
-        # grid_encode = tcnn.Encoding(3, self.config["input_grid_encoding_o"])
-        # # 33 in 1=t 2-32=grid_encode_output
-        # dx_net = tcnn.NetworkWithInputEncoding(33, 3, self.config["input_dx_encoding"],self.config["cutlass_two"])
-        # alpha_net = tcnn.Network(32,16, self.config["cutlass_two"])
-        
         #
-        dx_net = tcnn.NetworkWithInputEncoding(self.input_ch_pts+self.input_ch_time,
-                                               self.output_ch_dx,
-                                               self.config["input_grid_encoding"],
-                                               self.config["cutlass_two"])
-        alpha_net = tcnn.NetworkWithInputEncoding(self.input_ch_pts,
-                                                  self.output_ch_alpha,
-                                                  self.config["input_grid_encoding"],
-                                                  self.config["cutlass_two"])
+        # todo join grid encodings!
+        grid_encode = tcnn.Encoding(3, self.config["input_grid_encoding_o"])
+        # 33 in 1=t 2-32=grid_encode_output
+        dx_net = tcnn.NetworkWithInputEncoding(33, 3, self.config["input_dx_encoding"],self.config["cutlass_two"])
+        alpha_net = tcnn.Network(32, 16, self.config["cutlass_two"])
+        
+        # dx_net = tcnn.NetworkWithInputEncoding(self.input_ch_pts+self.input_ch_time,
+        #                                        self.output_ch_dx,
+        #                                        self.config["input_grid_encoding"],
+        #                                        self.config["cutlass_two"])
+        # alpha_net = tcnn.NetworkWithInputEncoding(self.input_ch_pts,
+        #                                           self.output_ch_alpha,
+        #                                           self.config["input_grid_encoding"],
+        #                                           self.config["cutlass_two"])
         rgb_net = tcnn.NetworkWithInputEncoding(self.input_ch_view + self.output_ch_alpha,
                                                 self.output_ch_rgb,
                                                 self.config["input_sh_encoding"],
                                                 self.config["cutlass_two"])
         
-        return dx_net, alpha_net, rgb_net
+        return dx_net, alpha_net, rgb_net, grid_encode
     
     def create_model_separate(self):
         dx_encode = tcnn.Encoding(self.input_ch_pts+self.input_ch_time,
@@ -135,8 +134,13 @@ class FastTemporalNerf():
         return dx_net, alpha_net, rgb_net
         
     # Return  parameter list for all networks
-    def get_parameters(self):
-        return list(self.dx_net.parameters()) + list(self.alpha_net.parameters()) + list(self.rgb_net.parameters())
+    def get_optimizer(self):
+        return torch.optim.Adam([{'params': self.dx_net.parameters(), 'lr': 5e-7, 'weight_decay': 1e-6},
+                                 {'params': self.alpha_net.parameters(), 'lr': 5e-7, 'weight_decay': 1e-6},
+                                 {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
+                                 {'params': self.grid_encode.parameters()}
+                                ], lr=5e-7, eps=1e-15, betas=(0.9, 0.999))
+        
     
     # Forward propagation
     def forward(self, x, t):
@@ -159,14 +163,16 @@ class FastTemporalNerf():
             # if canonical space is also at t = 0
             dx_out = torch.zeros_like(input_pts)
         else:
+            input_pts_enc = self.grid_encode(input_pts)
             # Concatenate pts with time to input to dx_net
-            input_dx = torch.cat([input_pts, t], dim=-1)
+            input_dx = torch.cat([t, input_pts_enc], dim=-1)
             # Use dx_net (4in, 3out)
             dx_out = self.dx_net(input_dx)
             # Add positional delta dx to pts
             input_pts = input_pts + dx_out
+        input_pts_enc = self.grid_encode(input_pts)
         # Use alpha_net (3in, 16out)
-        alpha_out = self.alpha_net(input_pts)
+        alpha_out = self.alpha_net(input_pts_enc)
         # Concatenate pts views with alpha_net output
         input_rgb = torch.cat([input_views, alpha_out], dim=-1)
         # Use rgbModel (19in, 3out)
