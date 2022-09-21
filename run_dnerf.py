@@ -212,7 +212,7 @@ def run_tcnn_network(inputs, viewdirs, frame_time, fn, netchunk=1024*64):
     # Flatten inputs from (N_rays,Samples,Coords) -> (Indice,Coords)
     input_pts_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     input_views_temp = viewdirs[:,None].expand(inputs.shape)
-    input_views_flat = torch.reshape(input_views_temp, [-1, viewdirs.shape[-1]])
+    input_views_flat = torch.reshape(input_views_temp, [-1, input_views_temp.shape[-1]])
     # Pts and View inputs are concatenated, then passed to networks
     inputs_flat = torch.cat([input_pts_flat, input_views_flat], -1)
     
@@ -238,12 +238,12 @@ def batchify(fn, chunk):
     """
     if chunk is None:
         return fn
-    def ret(inputs_pts, input_time):
-        num_batches = inputs_pts.shape[0]
+    def ret(inputs, input_time):
+        num_batches = inputs.shape[0]
         out_list = []
         dx_list = []
         for i in range(0, num_batches, chunk):
-            out,dx = fn(inputs_pts[i:i+chunk], input_time[i:i+chunk])
+            out,dx = fn(inputs[i:i+chunk], input_time[i:i+chunk])
             out_list += [out]
             dx_list += [dx]
         return torch.cat(out_list, 0), torch.cat(dx_list, 0)
