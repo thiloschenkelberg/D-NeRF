@@ -39,7 +39,8 @@ def create_nerf(args):
                  input_ch_views=input_ch_views, input_ch_time=input_ch_time,
                  use_viewdirs=args.use_viewdirs, embed_fn=embed_fn,
                  zero_canonical=not args.not_zero_canonical).to(device)
-    grad_vars = list(model.parameters())
+    #grad_vars = list(model.parameters())
+    grad_vars = model.params()
 
     #region Fine model (not used in example)
     model_fine = None
@@ -53,12 +54,15 @@ def create_nerf(args):
     #endregion
 
     # shortcut for run_network function that takes inputs, viewdirs, times and the network
-    network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_network(inputs, viewdirs, ts, network_fn,
-                                                                embed_fn=embed_fn,
-                                                                embeddirs_fn=embeddirs_fn,
-                                                                embedtime_fn=embedtime_fn,
-                                                                netchunk=args.netchunk,
-                                                                embd_time_discr=args.nerf_type!="temporal")
+    # network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_network(inputs, viewdirs, ts, network_fn,
+    #                                                             embed_fn=embed_fn,
+    #                                                             embeddirs_fn=embeddirs_fn,
+    #                                                             embedtime_fn=embedtime_fn,
+    #                                                             netchunk=args.netchunk,
+    #                                                             embd_time_discr=args.nerf_type!="temporal")
+    
+    network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_tcnn_network(inputs, viewdirs, ts, network_fn,
+                                                                                  netchunk=args.netchunk)
     
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
@@ -133,7 +137,7 @@ def create_tcnn_nerf(args):
     model = NeRF.get_by_name(args.nerf_type, debug=DEBUG)
     assert type(model) == FastTemporalNerf, "Wrong nerf type in args."
     # Get dx and rgb model parameters
-    grad_vars_dx, grad_vars_rgb = model.parameters()
+    grad_vars = model.get_parameters()
     
     # Build network shortcut lambda function
     # really only shortcuts passing of netchunk size, but is consistent with original implementation
@@ -141,7 +145,7 @@ def create_tcnn_nerf(args):
                                                                                   netchunk=args.netchunk)
 
     # Create Adam optimizer for combined model parameters
-    optimizer = torch.optim.Adam(grad_vars_dx + grad_vars_rgb, lr=args.lrate, betas=(0.9, 0.999))
+    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
     start = 0
     
@@ -162,9 +166,10 @@ def create_tcnn_nerf(args):
     render_kwargs_test['perturb'] = False
     render_kwargs_test['raw_noise_std'] = 0.
 
+    #return render_kwargs_train, render_kwargs_test, start, optimizer
     return render_kwargs_train, render_kwargs_test, start, optimizer
 
-def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=1024*64,
+def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=512*32,
                 embd_time_discr=True):
     """Prepares inputs and applies network 'fn'.
     inputs: N_rays x N_points_per_ray x 3
@@ -247,7 +252,7 @@ def batchify(fn, chunk):
         return torch.cat(out_list, 0), torch.cat(dx_list, 0)
     return ret
 
-def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
+def batchify_rays(rays_flat, chunk=512*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
@@ -274,6 +279,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
+    # calculate alpha back from log space -> torch.exp
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
     dists = z_vals[...,1:] - z_vals[...,:-1]
@@ -281,6 +287,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
+    #sigmoid activation of rgb output
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     noise = 0.
     if raw_noise_std > 0.:
@@ -600,7 +607,7 @@ def config_parser():
                         help='exponential learning rate decay (in 1000 steps)')
     parser.add_argument("--chunk", type=int, default=512*32, 
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=512*64, 
+    parser.add_argument("--netchunk", type=int, default=512*32, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true', 
                         help='only take random rays from 1 image at a time')
@@ -681,13 +688,13 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
-    parser.add_argument("--i_print",   type=int, default=1000,
+    parser.add_argument("--i_print",   type=int, default=100,
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=1000,
+    parser.add_argument("--i_img",     type=int, default=500,
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=1000,
+    parser.add_argument("--i_weights", type=int, default=10000,
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=1000,
+    parser.add_argument("--i_testset", type=int, default=500,
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=200000,
                         help='frequency of render_poses video saving')
@@ -695,7 +702,7 @@ def config_parser():
     return parser
 
 
-def train(): # python run_dnerf.py --config configs/mutant.txt
+def train(): # python3 run_dnerf.py --config configs/mutant.txt
 
     parser = config_parser()
     args = parser.parse_args()
@@ -783,7 +790,6 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
         render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
     assert render_kwargs_train is not None, "Creating nerf failed."
         
-
     global_step = start
     if DEBUG:
         print('Created NeRF model.')
@@ -891,6 +897,7 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
                 skip_factor = i / float(args.precrop_iters_time) * len(i_train)
                 max_sample = max(int(skip_factor), 3)
                 img_i = np.random.choice(i_train[:max_sample])
+            tr_ex = img_i
 
             #target     = comparison for predicted RGB colors for selected training example img_i
             #pose       = transformation matrix of selected training example (first 3 quadruples)
@@ -985,6 +992,7 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
         #endregion
         
         optimizer.zero_grad()
+        
         img_loss = img2mse(rgb, target_s)
         loss = img_loss + tv_loss
         psnr = mse2psnr(img_loss)
@@ -999,6 +1007,8 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
                 scaled_loss.backward()
         else:
             loss.backward()
+        
+        # loss.backward()
 
         optimizer.step()
 
@@ -1106,7 +1116,7 @@ def train(): # python run_dnerf.py --config configs/mutant.txt
             print('Saved test set')
             
         if DEBUG:
-            print('\nIteration ', i, ' completed. Learned from training example ',img_i,'.')
+            print('\nIteration ', i, ' completed. Learned from training example ',tr_ex,'.')
             input('Press Enter to start next iteration.')
 
         global_step += 1

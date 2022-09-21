@@ -1,16 +1,5 @@
 {
-	"loss": {
-		"otype": "RelativeL2"
-	},
-	"optimizer": {
-		"otype": "Adam",
-		"learning_rate": 1e-2,
-		"beta1": 0.9,
-		"beta2": 0.99,
-		"epsilon": 1e-15,
-		"l2_reg": 1e-6
-	},
-	"input_rgb_encoding": {
+	"input_grid_encoding": {
 		"otype": "Composite",
 		"nested": [
 			{
@@ -19,42 +8,80 @@
 				"type": "Hash",
 				"n_levels": 16,
 				"n_features_per_level": 2,
-				"log2_hashmap_size": 15,
+				"log2_hashmap_size": 19,
 				"base_resolution": 16,
 				"per_level_scale": 1.5
 			},
 			{
-				"n_dims_to_encode": 3,
-				"otype": "SphericalHarmonics",
-				"degree": 4
-			}
-		]
-	},
-	"input_dx_encoding": {
-		"otype": "Composite",
-		"nested": [
-			{
-				"n_dims_to_encode": 3,
-				"otype": "Grid",
-				"type": "Hash",
-				"n_levels": 16,
-				"n_features_per_level": 2,
-				"log2_hashmap_size": 15,
-				"base_resolution": 16,
-				"per_level_scale": 1.5
-			},
-			{
-				"n_dims_to_encode": 1,
 				"otype": "Frequency",
 				"n_frequencies": 10
 			}
 		]
 	},
-	"cutlass": {
+	"input_sh_encoding": {
+		"otype": "Composite",
+		"nested": [
+			{
+				"n_dims_to_encode": 3,
+				"otype": "SphericalHarmonics",
+				"degree": 4
+			},
+			{
+				"otype": "Identity"
+			}
+		]
+	},
+	"input_freq_encoding": {
+		"otype": "Composite",
+		"nested": [
+			{
+				"n_dims_to_encode": 4,
+				"otype": "Frequency",
+				"n_frequencies": 10
+			},
+			{
+				"otype": "Identity"
+			}
+		]
+	},
+	"input_ident_encoding": {
+		"otype": "Composite",
+		"nested": [
+			{
+				"otype": "Identity"
+			}
+		]
+	},
+	"input_freq_encoding_o": {
+		"otype": "Frequency",
+		"n_frequencies": 10
+	},
+	"cutlass_one": {
+		"otype": "CutlassMLP",
+		"activation": "ReLU",
+		"output_activation": "None",
+		"n_neurons": 64,
+		"n_hidden_layers": 1
+	},
+	"cutlass_two": {
 		"otype": "CutlassMLP",
 		"activation": "ReLU",
 		"output_activation": "None",
 		"n_neurons": 64,
 		"n_hidden_layers": 2
+	},
+	"cutlass_three": {
+		"otype": "CutlassMLP",
+		"activation": "ReLU",
+		"output_activation": "None",
+		"n_neurons": 64,
+		"n_hidden_layers": 3
+	},
+	"cutlass_four": {
+		"otype": "CutlassMLP",
+		"activation": "ReLU",
+		"output_activation": "None",
+		"n_neurons": 64,
+		"n_hidden_layers": 4
 	}
 }

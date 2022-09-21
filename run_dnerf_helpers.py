@@ -8,6 +8,8 @@ from torchsearchsorted import searchsorted
 import commentjson as json
 import tinycudann as tcnn
 
+from pathlib import Path
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Misc
@@ -68,74 +70,131 @@ def get_embedder(multires, input_dims, i=0):
     embedder_obj = Embedder(**embed_kwargs)
     embed = lambda x, eo=embedder_obj : eo.embed(x)
     return embed, embedder_obj.out_dim
-    
+
+# TCNN Model
 class FastTemporalNerf():
     def __init__(self, input_ch_pts=3, input_ch_view=3, input_ch_time=1,
-                 output_ch_dx=3, output_ch_rgb=4,
+                 output_ch_dx=3, output_ch_alpha=16, output_ch_rgb=3,
                  zero_canonical=True,
                  debug=False):
         # Read tcnn config file
         with open("configs/_config_tcnn.json") as f:
             self.config=json.load(f)
-        self.input_ch_pos=input_ch_pts
+        self.input_ch_pts=input_ch_pts
         self.input_ch_view=input_ch_view
         self.input_ch_time=input_ch_time
         self.output_ch_dx=output_ch_dx
+        self.output_ch_alpha=output_ch_alpha
         self.output_ch_rgb=output_ch_rgb
         self.zero_canonical=zero_canonical
-        self.dxModel=self.create_dx_model()
-        self.rgbModel=self.create_rgb_model()
         self.debug=debug
+        #self.dx_net, self.alpha_net, self.rgb_net = self.create_model()
+        self.dx_net, self.alpha_net, self.rgb_net = self.create_model_separate()
     
-    # Create model learning positional delta
-    def create_dx_model(self):
-        return tcnn.NetworkWithInputEncoding(self.input_ch_pos+self.input_ch_time,
-                                             self.output_ch_dx,
-                                             self.config["input_dx_encoding"],
-                                             self.config['cutlass'])
-    # Create model learning color and density
-    def create_rgb_model(self):
-        return tcnn.NetworkWithInputEncoding(self.input_ch_pos+self.input_ch_view,
-                                             self.output_ch_rgb,
-                                             self.config["input_rgb_encoding"],
-                                             self.config['cutlass'])
-    # Return  parameter lists for both models
-    def parameters(self):
-        return list(self.dxModel.parameters()), list(self.rgbModel.parameters())
+    # Create model with dx_, alpha_, and rgb_net
+    def create_model(self):
+        dx_net = tcnn.NetworkWithInputEncoding(self.input_ch_pts+self.input_ch_time,
+                                               self.output_ch_dx,
+                                               self.config["input_grid_encoding"],
+                                               self.config['cutlass_two'])
+        alpha_net = tcnn.NetworkWithInputEncoding(self.input_ch_pts,
+                                                  self.output_ch_alpha,
+                                                  self.config["input_grid_encoding"],
+                                                  self.config['cutlass_two'])
+        rgb_net = tcnn.NetworkWithInputEncoding(self.input_ch_view + self.output_ch_alpha,
+                                                self.output_ch_rgb,
+                                                self.config["input_sh_encoding"],
+                                                self.config['cutlass_two'])
+        
+        return dx_net, alpha_net, rgb_net
+    
+    def create_model_separate(self):
+        dx_encode = tcnn.Encoding(self.input_ch_pts+self.input_ch_time,
+                                  self.config["input_grid_encoding"])
+        alpha_encode = tcnn.Encoding(self.input_ch_pts,
+                                  self.config["input_grid_encoding"])
+        rgb_encode = tcnn.Encoding(self.input_ch_view+self.output_ch_alpha,
+                                  self.config["input_sh_encoding"])
+        
+        dx_net_p = tcnn.Network(52,3,self.config["cutlass_one"])
+        alpha_net_p = tcnn.Network(32, 16, self.config["cutlass_one"])
+        rgb_net_p = tcnn.Network(rgb_encode.n_output_dims, 3, self.config["cutlass_two"])
+        
+        dx_net = torch.nn.Sequential(dx_encode, dx_net_p)
+        alpha_net = torch.nn.Sequential(alpha_encode, alpha_net_p)
+        rgb_net = torch.nn.Sequential(rgb_encode, rgb_net_p)
+        
+        return dx_net, alpha_net, rgb_net
+        
+    # Return  parameter list for all networks
+    def get_parameters(self):
+        return list(self.dx_net.parameters()) + list(self.alpha_net.parameters()) + list(self.rgb_net.parameters())
     
     # Forward propagation
     def forward(self, x, t):
         # Split concatenated inputs x back to pts and views
-        input_pts, input_views = torch.split(x, [self.input_ch_pos,self.input_ch_view], dim=-1)
+        input_pts, input_views = torch.split(x, [self.input_ch_pts,self.input_ch_view], dim=-1)
         assert len(torch.unique(t)) == 1, "Only accepts all points from same time"
+        
+        if self.debug:
+            # Save tensors to file in ./test/
+            i_pts = input_pts.to('cpu')
+            i_views = input_views.to('cpu')
+            i_time = t.to('cpu')
+            np.savetxt('./test/input_pts.txt', i_pts.numpy())
+            np.savetxt('./test/input_views.txt', i_views.numpy())
+            np.savetxt('./test/time.txt', i_time.numpy())
         
         cur_time = t[0, 0]
         if cur_time == 0. and self.zero_canonical:
             # No positional delta at t = 0
             # if canonical space is also at t = 0
-            dx = torch.zeros_like(input_pts)
+            dx_out = torch.zeros_like(input_pts)
         else:
-            # Concatenate pts with time to input to dxModel
+            # Concatenate pts with time to input to dx_net
             input_dx = torch.cat([input_pts, t], dim=-1)
-            # Use dxModel
-            dx = self.dxModel(input_dx)
+            # Use dx_net (4in, 3out)
+            dx_out = self.dx_net(input_dx)
             # Add positional delta dx to pts
-            input_pts = input_pts + dx
-        # Concatenate pts with views to input to rgbModel
-        input_rgb = torch.cat([input_pts, input_views], dim=-1)
-        # Use rgbModel
-        out = self.rgbModel(input_rgb)
+            input_pts = input_pts + dx_out
+        # Use alpha_net (3in, 16out)
+        alpha_out = self.alpha_net(input_pts)
+        # Concatenate pts views with alpha_net output
+        input_rgb = torch.cat([input_views, alpha_out], dim=-1)
+        # Use rgbModel (19in, 3out)
+        rgb_out = self.rgb_net(input_rgb)
+        # Concatenate rgb with first output value of alpha_net
+        rgba_out = torch.cat([rgb_out, alpha_out[...,:1]], dim=-1)
         
         if self.debug:
-            print('\nforward()\ninput_pts shape: ', input_pts.shape,
-                  '\ninput_views shape: ', input_views.shape,
-                  '\ninput_pts shape: ', input_pts.shape)
+            # Log tensor shapes
+            print('\nforward()',
+                  '\ninput_views shape: ', input_views.shape)
             if cur_time != 0. and self.zero_canonical:
                 print('input_dx shape: ', input_dx.shape)
             else:
                 print('cur_time is 0.')
-        
-        return out,dx
+            print('input_alpha shape: ', input_pts.shape,
+                  '\ninput_rgb shape: ', input_rgb.shape)
+            
+            # Save tensors to file in ./test/
+            if cur_time != 0. and self.zero_canonical:
+                i_dx = input_dx.to('cpu')
+                np.savetxt('./test/input_dx.txt', i_dx.numpy())
+                o_dx = dx_out.to('cpu')
+                np.savetxt('./test/dx_out.txt', o_dx.numpy())
+                i_pts_dx = input_pts.to('cpu')
+                np.savetxt('./test/input_ptsdx.txt', i_pts_dx.numpy())
+            a_out = alpha_out.to('cpu')
+            np.savetxt('./test/alpha_out.txt', a_out.numpy())
+            i_rgb = input_rgb.to('cpu')
+            np.savetxt('./test/input_rgb.txt', i_rgb.numpy())
+            o_rgb = rgb_out.to('cpu')
+            np.savetxt('./test/rgb_out.txt', o_rgb.numpy())
+            o_rgba = rgba_out.to('cpu')
+            np.savetxt('./test/rgba_out.txt', o_rgba.numpy())
+            
+        return rgba_out,dx_out
 
     __call__ = forward
 
@@ -154,14 +213,24 @@ class DirectTemporalNeRF(nn.Module):
         self.memory = memory
         self.embed_fn = embed_fn
         self.zero_canonical = zero_canonical
+        with open("configs/_config_tcnn.json") as f:
+            self.config=json.load(f)
 
         self._occ = NeRFOriginal(D=D, W=W, input_ch=input_ch, input_ch_views=input_ch_views,
                                  input_ch_time=input_ch_time, output_ch=output_ch, skips=skips,
                                  use_viewdirs=use_viewdirs, memory=memory, embed_fn=embed_fn, output_color_ch=3)
         self._time, self._time_out = self.create_time_net()
+        self.dx_encode, self.view_encode = self.get_tcnn_encodings()
+        #self.time_net = self.create_tcnn_time_net()
+        
+    def create_tcnn_time_net(self):
+        time_net = tcnn.NetworkWithInputEncoding(84,3,
+                                                 self.config["input_ident_encoding"],
+                                                 self.config["cutlass_two"])
+        return time_net
 
     def create_time_net(self):
-        layers = [nn.Linear(self.input_ch + self.input_ch_time, self.W)]
+        layers = [nn.Linear(52, self.W)]
         for i in range(self.D - 1):
             if i in self.memory:
                 raise NotImplementedError
@@ -170,35 +239,61 @@ class DirectTemporalNeRF(nn.Module):
 
             in_channels = self.W
             if i in self.skips:
-                in_channels += self.input_ch
+                in_channels += 32
 
             layers += [layer(in_channels, self.W)]
         return nn.ModuleList(layers), nn.Linear(self.W, 3)
+    
+    def get_tcnn_encodings(self):
+        dx_encode = tcnn.Encoding(4, self.config["input_grid_encoding"])
+        view_encode = tcnn.Encoding(3, self.config["input_sh_encoding"])
+        return dx_encode, view_encode
 
-    def query_time(self, new_pts, t, net, net_final):
-        h = torch.cat([new_pts, t], dim=-1)
-        # net (8, input_ch + input_ch_time, 3)
+    def query_time(self, pts, net, net_final):
+        ipts, _ = torch.split(pts,[32, 20],dim=-1)
+        h = pts
+        # net (8 + final, input_ch + input_ch_time, 3)
         for i, l in enumerate(net):
             h = net[i](h)
             h = F.relu(h)
             if i in self.skips:
-                h = torch.cat([new_pts, h], -1)
+                h = torch.cat([ipts, h], -1)
 
         return net_final(h)
 
-    # relevant usage of network with pts and time input
+    # def forward(self, x, t):
+    #     input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+    #     assert len(torch.unique(t[:, :1])) == 1, "Only accepts all points from same time"
+    #     cur_time = t[0, 0]
+    #     if cur_time == 0. and self.zero_canonical:
+    #         dx = torch.zeros_like(input_pts[:, :3])
+    #     else:
+    #         dx = self.query_time(input_pts, t, self._time, self._time_out)
+    #         input_pts_orig = input_pts[:, :3]
+    #         input_pts = self.embed_fn(input_pts_orig + dx)
+    #     out, _ = self._occ(torch.cat([input_pts, input_views], dim=-1), t)
+    #     return out, dx
+    
     def forward(self, x, t):
-        input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+        input_pts, input_views = torch.split(x, [3, 3], dim=-1)
         assert len(torch.unique(t[:, :1])) == 1, "Only accepts all points from same time"
         cur_time = t[0, 0]
         if cur_time == 0. and self.zero_canonical:
-            dx = torch.zeros_like(input_pts[:, :3])
+            dx = torch.zeros_like(input_pts)
         else:
-            dx = self.query_time(input_pts, t, self._time, self._time_out)
-            input_pts_orig = input_pts[:, :3]
-            input_pts = self.embed_fn(input_pts_orig + dx)
+            input_dx = torch.cat([input_pts, t], dim=-1)
+            input_dx_enc = self.dx_encode(input_dx)
+            dx = self.query_time(input_dx_enc, self._time, self._time_out)
+            input_pts = input_pts + dx
+        input_pts_temp = self.dx_encode(torch.cat([input_pts, t], dim=-1))
+        input_pts = input_pts_temp[:,:32]
+        input_views = self.view_encode(input_views)
         out, _ = self._occ(torch.cat([input_pts, input_views], dim=-1), t)
         return out, dx
+    
+    def params(self):
+        return list(self._occ.parameters()) + list(self._time.parameters()) + list(self._time_out.parameters()) + list(self.dx_encode.parameters()) + list(self.view_encode.parameters())
+        
 
 
 class NeRF:
@@ -227,11 +322,13 @@ class NeRFOriginal(nn.Module):
         self.skips = skips
         self.use_viewdirs = use_viewdirs
 
+
+
         # self.pts_linears = nn.ModuleList(
         #     [nn.Linear(input_ch, W)] +
         #     [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
 
-        layers = [nn.Linear(input_ch, W)]
+        layers = [nn.Linear(32, W)]
         for i in range(D - 1):
             if i in memory:
                 raise NotImplementedError
@@ -240,14 +337,14 @@ class NeRFOriginal(nn.Module):
 
             in_channels = W
             if i in self.skips:
-                in_channels += input_ch
+                in_channels += 32
 
             layers += [layer(in_channels, W)]
 
         self.pts_linears = nn.ModuleList(layers)
 
         ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
-        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
+        self.views_linears = nn.ModuleList([nn.Linear(16 + W, W//2)])
 
         ### Implementation according to the paper
         # self.views_linears = nn.ModuleList(
@@ -261,7 +358,7 @@ class NeRFOriginal(nn.Module):
             self.output_linear = nn.Linear(W, output_ch)
 
     def forward(self, x, ts):
-        input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+        input_pts, input_views = torch.split(x, [32, 16], dim=-1)
         h = input_pts
         # 8 layers (input_ch, 256)
         for i, l in enumerate(self.pts_linears):
@@ -288,7 +385,7 @@ class NeRFOriginal(nn.Module):
         else:
             outputs = self.output_linear(h)
 
-        return outputs, torch.zeros_like(input_pts[:, :3])
+        return outputs, torch.zeros_like(input_pts)
 
     def load_weights_from_keras(self, weights):
         assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
