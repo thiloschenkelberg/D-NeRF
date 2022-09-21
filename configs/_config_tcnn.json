@@ -8,7 +8,7 @@
 				"type": "Hash",
 				"n_levels": 16,
 				"n_features_per_level": 2,
-				"log2_hashmap_size": 19,
+				"log2_hashmap_size": 15,
 				"base_resolution": 16,
 				"per_level_scale": 1.5
 			},
@@ -44,13 +44,30 @@
 			}
 		]
 	},
-	"input_ident_encoding": {
+	"input_dx_encoding": {
 		"otype": "Composite",
 		"nested": [
+			{
+				"n_dims_to_encode": 1,
+				"otype": "Frequency",
+				"n_frequencies": 10
+			},
 			{
 				"otype": "Identity"
 			}
 		]
+	},
+	"input_grid_encoding_o": {
+		"otype": "Grid",
+		"type": "Hash",
+		"n_levels": 16,
+		"n_features_per_level": 2,
+		"log2_hashmap_size": 15,
+		"base_resolution": 16,
+		"per_level_scale": 1.5
+	},
+	"input_ident_encoding": {
+		"otype": "Identity"
 	},
 	"input_freq_encoding_o": {
 		"otype": "Frequency",

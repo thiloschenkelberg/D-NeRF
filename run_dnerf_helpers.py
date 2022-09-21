@@ -88,23 +88,31 @@ class FastTemporalNerf():
         self.output_ch_rgb=output_ch_rgb
         self.zero_canonical=zero_canonical
         self.debug=debug
-        #self.dx_net, self.alpha_net, self.rgb_net = self.create_model()
-        self.dx_net, self.alpha_net, self.rgb_net = self.create_model_separate()
+        self.dx_net, self.alpha_net, self.rgb_net = self.create_model()
+        #self.dx_net, self.alpha_net, self.rgb_net = self.create_model_separate()
     
     # Create model with dx_, alpha_, and rgb_net
     def create_model(self):
+        # #
+        # # todo join grid encodings!
+        # grid_encode = tcnn.Encoding(3, self.config["input_grid_encoding_o"])
+        # # 33 in 1=t 2-32=grid_encode_output
+        # dx_net = tcnn.NetworkWithInputEncoding(33, 3, self.config["input_dx_encoding"],self.config["cutlass_two"])
+        # alpha_net = tcnn.Network(32,16, self.config["cutlass_two"])
+        
+        #
         dx_net = tcnn.NetworkWithInputEncoding(self.input_ch_pts+self.input_ch_time,
                                                self.output_ch_dx,
                                                self.config["input_grid_encoding"],
-                                               self.config['cutlass_two'])
+                                               self.config["cutlass_two"])
         alpha_net = tcnn.NetworkWithInputEncoding(self.input_ch_pts,
                                                   self.output_ch_alpha,
                                                   self.config["input_grid_encoding"],
-                                                  self.config['cutlass_two'])
+                                                  self.config["cutlass_two"])
         rgb_net = tcnn.NetworkWithInputEncoding(self.input_ch_view + self.output_ch_alpha,
                                                 self.output_ch_rgb,
                                                 self.config["input_sh_encoding"],
-                                                self.config['cutlass_two'])
+                                                self.config["cutlass_two"])
         
         return dx_net, alpha_net, rgb_net
     

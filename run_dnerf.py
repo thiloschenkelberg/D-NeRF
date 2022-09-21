@@ -145,7 +145,9 @@ def create_tcnn_nerf(args):
                                                                                   netchunk=args.netchunk)
 
     # Create Adam optimizer for combined model parameters
-    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+    optimizer = torch.optim.Adam(grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+    print(len(optimizer.params))
+    input('stop')
 
     start = 0
     
