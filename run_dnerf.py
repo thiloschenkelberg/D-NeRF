@@ -39,8 +39,7 @@ def create_nerf(args):
                  input_ch_views=input_ch_views, input_ch_time=input_ch_time,
                  use_viewdirs=args.use_viewdirs, embed_fn=embed_fn,
                  zero_canonical=not args.not_zero_canonical).to(device)
-    #grad_vars = list(model.parameters())
-    grad_vars = model.params()
+    grad_vars = list(model.parameters())
 
     #region Fine model (not used in example)
     model_fine = None
@@ -54,15 +53,12 @@ def create_nerf(args):
     #endregion
 
     # shortcut for run_network function that takes inputs, viewdirs, times and the network
-    # network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_network(inputs, viewdirs, ts, network_fn,
-    #                                                             embed_fn=embed_fn,
-    #                                                             embeddirs_fn=embeddirs_fn,
-    #                                                             embedtime_fn=embedtime_fn,
-    #                                                             netchunk=args.netchunk,
-    #                                                             embd_time_discr=args.nerf_type!="temporal")
-    
-    network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_tcnn_network(inputs, viewdirs, ts, network_fn,
-                                                                                  netchunk=args.netchunk)
+    network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_network(inputs, viewdirs, ts, network_fn,
+                                                                embed_fn=embed_fn,
+                                                                embeddirs_fn=embeddirs_fn,
+                                                                embedtime_fn=embedtime_fn,
+                                                                netchunk=args.netchunk,
+                                                                embd_time_discr=args.nerf_type!="temporal")
     
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
@@ -286,6 +282,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     #sigmoid activation of rgb output
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    #rgb = raw[...,:3]
     noise = 0.
     if raw_noise_std > 0.:
         noise = torch.randn(raw[...,3].shape) * raw_noise_std
@@ -459,7 +456,6 @@ def render_rays(ray_batch,
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
     run_fn = network_fn if network_fine is None else network_fine
     
-    # Essential call of network_query_fn
     raw, position_delta = network_query_fn(pts, viewdirs, frame_time, run_fn)
     rgb_map, disp_map, acc_map, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
     if DEBUG:
@@ -598,7 +594,7 @@ def config_parser():
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--do_half_precision", action='store_true',
                         help='do half precision training and inference')
-    parser.add_argument("--lrate", type=float, default=1e-5, 
+    parser.add_argument("--lrate", type=float, default=5e-4, 
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
@@ -685,7 +681,7 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
-    parser.add_argument("--i_print",   type=int, default=5,
+    parser.add_argument("--i_print",   type=int, default=50,
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=1000,
                         help='frequency of tensorboard image logging')
@@ -743,9 +739,9 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
         print('Unknown dataset type', args.dataset_type, 'exiting')
         return
 
-    min_time, max_time = times[i_train[0]], times[i_train[-1]]
-    assert min_time == 0., "time must start at 0"
-    assert max_time == 1., "max time must be 1"
+    #min_time, max_time = times[i_train[0]], times[i_train[-1]]
+    #assert min_time == 0., "time must start at 0"
+    #assert max_time == 1., "max time must be 1"
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -895,7 +891,6 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
                 max_sample = max(int(skip_factor), 3)
                 img_i = np.random.choice(i_train[:max_sample])
             tr_ex = img_i
-            #img_i =0
 
             #target     = comparison for predicted RGB colors for selected training example img_i
             #pose       = transformation matrix of selected training example (first 3 quadruples)
