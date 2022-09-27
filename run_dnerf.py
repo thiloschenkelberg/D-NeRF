@@ -3,6 +3,7 @@ import imageio
 import time
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
+import sys
 
 
 from run_dnerf_helpers import *
@@ -21,15 +22,24 @@ DEBUG = False
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
-    # Create embedder based on resolution (lvl of frequency encoding)
-    # set no. of input dimensions
-    # write no. of output dimensions to _ch
-    embed_fn, input_ch = get_embedder(args.multires, 3, args.i_embed)
-    embedtime_fn, input_ch_time = get_embedder(args.multires, 1, args.i_embed)
-    input_ch_views = 0
-    embeddirs_fn = None
-    if args.use_viewdirs:
-        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, 3, args.i_embed)
+    if args.i_embed != 1:
+        # Create embedder based on resolution (lvl of frequency encoding)
+        # set no. of input dimensions
+        # write no. of output dimensions to _ch
+        embed_fn, input_ch = get_embedder(args.multires, 3, args.i_embed)
+        input_ch += 3
+        print(input_ch)
+        embedtime_fn, input_ch_time = get_embedder(args.multires, 1, args.i_embed)
+        input_ch_time += 1
+        print(input_ch_time)
+        input_ch_views = 0
+        embeddirs_fn = None
+        if args.use_viewdirs:
+            embeddirs_fn, input_ch_views = get_embedder(args.multires_views, 3, args.i_embed)
+            input_ch_views += 3
+            print(input_ch_views)
+    else:
+        embed_fn, embeddirs_fn, embedtime_fn, input_ch, input_ch_views, input_ch_time = get_tcnn_embedding()
     
     # Create original or direct temporal NeRF (args.nerf_type)
     output_ch = 5 if args.N_importance > 0 else 4
@@ -37,21 +47,30 @@ def create_nerf(args):
     model = NeRF.get_by_name(args.nerf_type, D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, input_ch_time=input_ch_time,
-                 use_viewdirs=args.use_viewdirs, embed_fn=embed_fn,
+                 use_viewdirs=args.use_viewdirs,
                  zero_canonical=not args.not_zero_canonical).to(device)
     grad_vars = list(model.parameters())
+    model.add_embedding(embed_fn)
 
-    #region Fine model (not used in example)
+    #region Fine model
     model_fine = None
     if args.use_two_models_for_fine:
         model_fine = NeRF.get_by_name(args.nerf_type, D=args.netdepth_fine, W=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
                           input_ch_views=input_ch_views, input_ch_time=input_ch_time,
-                          use_viewdirs=args.use_viewdirs, embed_fn=embed_fn,
+                          use_viewdirs=args.use_viewdirs,
                           zero_canonical=not args.not_zero_canonical).to(device)
+        model_fine.add_embedding(embed_fn)
         grad_vars += list(model_fine.parameters())
     #endregion
-
+    
+    # Create optimizer
+    #optimizer = torch.optim.Adam(params = grad_vars, lr=args.lrate, betas=(0.9, 0.999), eps=1e-15)
+    #print(optimizer.param_groups.)
+    optimizer = torch.optim.Adam([{'params': grad_vars},
+                                  {'params': embed_fn.parameters(), 'eps': 1e-15, 'lr': 1e-2}], lr=args.lrate, betas=(0.9,0.999), eps=1e-8)
+    loss = nn.MSELoss()
+    
     # shortcut for run_network function that takes inputs, viewdirs, times and the network
     network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_network(inputs, viewdirs, ts, network_fn,
                                                                 embed_fn=embed_fn,
@@ -59,9 +78,6 @@ def create_nerf(args):
                                                                 embedtime_fn=embedtime_fn,
                                                                 netchunk=args.netchunk,
                                                                 embd_time_discr=args.nerf_type!="temporal")
-    
-    # Create optimizer
-    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
     #region Half precision
     if args.do_half_precision:
@@ -125,15 +141,19 @@ def create_nerf(args):
     render_kwargs_test['perturb'] = False
     render_kwargs_test['raw_noise_std'] = 0.
 
-    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
+    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, loss
 
 def create_tcnn_nerf(args):
     # Create FastTemporalNerf
     print('\nDebug: ', DEBUG)
     model = NeRF.get_by_name(args.nerf_type, debug=DEBUG)
     assert type(model) == FastTemporalNerf, "Wrong nerf type in args."
-    # Get Adam optimizer with individual param_groups
+    # Get Adam optimizer
+    #grad_vars = model.parameters()
+    #optimizer = torch.optim.Adam(params=grad_vars, eps=1e-15, lr=1e-2)
     optimizer = model.get_optimizer()
+    print(optimizer.param_groups)
+    loss = nn.MSELoss()
     
     # Build network shortcut lambda function
     # really only shortcuts passing of netchunk size, but is consistent with original implementation
@@ -160,9 +180,9 @@ def create_tcnn_nerf(args):
     render_kwargs_test['raw_noise_std'] = 0.
 
     #return render_kwargs_train, render_kwargs_test, start, optimizer
-    return render_kwargs_train, render_kwargs_test, start, optimizer
+    return render_kwargs_train, render_kwargs_test, start, optimizer, model, loss
 
-def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=512*32,
+def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=512*64,
                 embd_time_discr=True):
     """Prepares inputs and applies network 'fn'.
     inputs: N_rays x N_points_per_ray x 3
@@ -175,6 +195,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
     # embed position
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
+    #embedded = torch.cat([inputs_flat, embedded], dim=-1)
 
     # embed time
     if embd_time_discr:
@@ -182,6 +203,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         input_frame_time = frame_time[:, None].expand([B, N, 1])
         input_frame_time_flat = torch.reshape(input_frame_time, [-1, 1])
         embedded_time = embedtime_fn(input_frame_time_flat)
+        embedded_time = torch.cat([input_frame_time_flat, embedded_time], dim=-1)
     else:
         assert NotImplementedError
 
@@ -190,6 +212,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
+        #embedded_dirs = torch.cat([input_dirs_flat, embedded_dirs], dim=-1)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
     outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_time)
@@ -202,7 +225,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
     position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
     return outputs, position_delta
 
-def run_tcnn_network(inputs, viewdirs, frame_time, fn, netchunk=1024*64):
+def run_tcnn_network(inputs, viewdirs, frame_time, fn, netchunk=512*64):
     assert len(torch.unique(frame_time)) == 1, "Only accepts all points from same time"
     
     # Flatten inputs from (N_rays,Samples,Coords) -> (Indice,Coords)
@@ -245,8 +268,9 @@ def batchify(fn, chunk):
         return torch.cat(out_list, 0), torch.cat(dx_list, 0)
     return ret
 
-def batchify_rays(rays_flat, chunk=512*32, **kwargs):
+def batchify_rays(rays_flat, chunk=512*64, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
+    Usually 500 rays with 12 fields
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
@@ -273,15 +297,20 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         depth_map: [num_rays]. Estimated distance to object.
     """
     # calculate alpha back from log space -> torch.exp
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    raw2alphafn = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    raw2alpha = lambda raw, dists: 1.-torch.exp(-raw*dists)
 
     dists = z_vals[...,1:] - z_vals[...,:-1]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
 
     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+    #print(dists.shape)
 
     #sigmoid activation of rgb output
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    #print(raw[...,:3].shape)
+    #print(rgb.shape)
+    
     #rgb = raw[...,:3]
     noise = 0.
     if raw_noise_std > 0.:
@@ -293,10 +322,15 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
 
-    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    alpha = raw2alphafn(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    #print(raw[...,3])
+    #print(alpha.shape)
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
+    #print(weights.shape)
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+    #rgb_print = rgb_map.cpu()
+    #np.savetxt('./test/rgb_print_ac.txt', rgb_print.numpy())
 
     depth_map = torch.sum(weights * z_vals, -1)
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
@@ -305,7 +339,8 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     if white_bkgd:
         rgb_map = rgb_map + (1.-acc_map[...,None])
         # rgb_map = rgb_map + torch.cat([acc_map[..., None] * 0, acc_map[..., None] * 0, (1. - acc_map[..., None])], -1)
-        
+    
+    #input('stop')
     return rgb_map, disp_map, acc_map, weights, depth_map
 
 def render_path(render_poses, render_times, hwf, chunk, render_kwargs, gt_imgs=None, savedir=None,
@@ -432,7 +467,6 @@ def render_rays(ray_batch,
 
         # Get N_samples pts along ray (eg. 64)
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
-
         # If no additional samples should be calculated
         if N_importance <= 0:
             raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
@@ -493,7 +527,7 @@ def render_rays(ray_batch,
 
     return ret
 
-def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
+def render(H, W, focal, chunk=512*64, rays=None, c2w=None, ndc=True,
                   near=0., far=1., frame_time=None,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
@@ -598,9 +632,9 @@ def config_parser():
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
-    parser.add_argument("--chunk", type=int, default=512*32, 
+    parser.add_argument("--chunk", type=int, default=512*64, 
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=512*32, 
+    parser.add_argument("--netchunk", type=int, default=512*64, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true', 
                         help='only take random rays from 1 image at a time')
@@ -622,8 +656,8 @@ def config_parser():
                         help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true', 
                         help='use full 5D input instead of 3D')
-    parser.add_argument("--i_embed", type=int, default=0, 
-                        help='set 0 for default positional encoding, -1 for none')
+    parser.add_argument("--i_embed", type=int, default=1, 
+                        help='set 0 for default positional encoding, -1 for none, 1 for tcnn')
     parser.add_argument("--multires", type=int, default=10, 
                         help='log2 of max freq for positional encoding (3D location)')
     parser.add_argument("--multires_views", type=int, default=4, 
@@ -683,11 +717,11 @@ def config_parser():
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=50,
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=1000,
+    parser.add_argument("--i_img",     type=int, default=500,
                         help='frequency of tensorboard image logging')
     parser.add_argument("--i_weights", type=int, default=10000,
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=1000,
+    parser.add_argument("--i_testset", type=int, default=500,
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=200000,
                         help='frequency of render_poses video saving')
@@ -778,9 +812,9 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
     # Frequency encoding time
     # return optimizer
     if args.nerf_type == "fast_temporal":
-        render_kwargs_train, render_kwargs_test, start, optimizer = create_tcnn_nerf(args)
+        render_kwargs_train, render_kwargs_test, start, optimizer, model, loss = create_tcnn_nerf(args)
     else:
-        render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+        render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, loss = create_nerf(args)
     assert render_kwargs_train is not None, "Creating nerf failed."
         
     global_step = start
@@ -951,7 +985,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
 
         # Loss calculation, backward propagation and optimizer step
         #region TV Loss
-        tv_loss = 0
+        tv_loss = 0.
         if args.add_tv_loss:
             frame_time_prev = times[img_i - 1] if img_i > 0 else None
             frame_time_next = times[img_i + 1] if img_i < times.shape[0] - 1 else None
@@ -984,11 +1018,13 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             tv_loss = tv_loss * args.tv_loss_weight
         #endregion
         
+        #output = loss(rgb, target_s)
+
+        output = img2mse(rgb, target_s)
+        output = output + tv_loss
+        psnr = mse2psnr(output)
+
         optimizer.zero_grad()
-        
-        img_loss = img2mse(rgb, target_s)
-        loss = img_loss + tv_loss
-        psnr = mse2psnr(img_loss)
 
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
@@ -999,19 +1035,20 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
         else:
-            loss.backward()
+            output.backward()
         
-        # loss.backward()
+        #plot_grad_flow(model.named_parameters())
+        #input("stop")
 
         optimizer.step()
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
-        decay_rate = 0.1
-        decay_steps = args.lrate_decay * 1000
-        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lrate
+        # decay_rate = 0.1
+        # decay_steps = args.lrate_decay * 1000
+        # new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+        # for param_group in optimizer.param_groups:
+        #     param_group['lr'] = new_lrate
         ################################
 
         dt = time.time()-time0
@@ -1035,20 +1072,22 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             print('Saved checkpoints at', path)
 
         if i % args.i_print == 0:
-            tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {img_loss.item()} PSNR: {psnr.item()}"
+            tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {output.item()} PSNR: {psnr.item()}"
             if args.add_tv_loss:
                 tqdm_txt += f" TV: {tv_loss.item()}"
             tqdm.write(tqdm_txt)
 
-            writer.add_scalar('loss', img_loss.item(), i)
+            writer.add_scalar('loss', output.item(), i)
             writer.add_scalar('psnr', psnr.item(), i)
             if 'rgb0' in extras:
                 writer.add_scalar('loss0', img_loss0.item(), i)
                 writer.add_scalar('psnr0', psnr0.item(), i)
             if args.add_tv_loss:
                 writer.add_scalar('tv', tv_loss.item(), i)
+                
+            print(optimizer.param_groups[1])
 
-        del loss, img_loss, psnr, target_s
+        del output, psnr, target_s
         if 'rgb0' in extras:
             del img_loss0, psnr0
         if args.add_tv_loss:
@@ -1101,11 +1140,15 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
         if i%args.i_testset==0:
+
+            # for param in embed_fn.parameters():
+            #     weights = param.to('cpu')
+            #     np.savetxt('./test/opt_out.txt', weights.detach().numpy())
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             print('Testing poses shape...', poses[i_test].shape)
             with torch.no_grad():
                 render_path(torch.Tensor(poses[i_test]).to(device), torch.Tensor(times[i_test]).to(device),
-                            hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                            hwf, 256*64, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
             
         if DEBUG:

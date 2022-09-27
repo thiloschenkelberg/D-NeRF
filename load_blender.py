@@ -93,8 +93,7 @@ def load_blender_data(basedir, half_res=False, testskip=1):
             fname = os.path.join(basedir, frame['file_path'] + '.png')
             imgs.append(imageio.imread(fname))
             poses.append(np.array(frame['transform_matrix']))
-            #cur_time = frame['time'] if 'time' in frame else float(t) / (len(meta['frames'][::skip])-1)
-            cur_time = 0.
+            cur_time = frame['time'] if 'time' in frame else 0.
             times.append(cur_time)
 
         assert times[0] == 0, "Time must start at 0"

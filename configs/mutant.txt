@@ -1,6 +1,6 @@
-expname = lego
+expname = mutant2
 basedir = ./logs
-datadir = ./data/lego
+datadir = ./data/mutant2
 dataset_type = blender
 
 nerf_type = fast_temporal
@@ -9,8 +9,8 @@ not_zero_canonical = False
 use_viewdirs = True
 
 use_viewdirs = True
-white_bkgd = False
-lrate_decay = 300
+white_bkgd = True
+lrate_decay = 500
 
 N_iter = 10000
 N_samples = 64
@@ -18,7 +18,7 @@ N_importance = 128
 N_rand = 500
 testskip = 1
 
-precrop_iters = 100
+precrop_iters = 50
 precrop_iters_time = 200
 precrop_frac = 0.5
 
