@@ -687,6 +687,10 @@ def config_parser():
                         help='number of steps to train on central time')
     parser.add_argument("--precrop_frac", type=float,
                         default=.5, help='fraction of img taken for central crops')
+    parser.add_argument("--successive_training_set", action="store_true",
+                        help='train images in strict succession')
+    parser.add_argument("--training_image_frequency", type=int, default=1,
+                        help='number of training steps per image when training images in strict succession')
     parser.add_argument("--add_tv_loss", action='store_true',
                         help='evaluate tv loss')
     parser.add_argument("--tv_loss_weight", type=float,
@@ -887,14 +891,20 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
     # Input no. of iterations manually or get from args
-    iterations = int(input('\nInput no. of iterations: '))
-    #N_iters = args.N_iter + 1
-    N_iters = iterations + 1
+    #iterations = int(input('\nInput no. of iterations: '))
+    #N_iters = iterations + 1
+    N_iters = args.N_iter + 1
 
     print('\nBegin')
 
     # Summary writers
     writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
+
+    # Successive training
+    successive_training = args.successive_training_set
+    # Make sure number of iterations is enough to work through training set successively instead of random
+    if N_iters <= args.training_image_frequency * len(i_train):
+        successive_training = False
     
     # Start of training loop
     if DEBUG > 0:
@@ -926,6 +936,9 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             # img_i = selected training example
             if i >= args.precrop_iters_time:
                 img_i = np.random.choice(i_train)
+            elif successive_training:
+                img_i = i_train[int(i/args.training_image_frequency)]
+                print(img_i)
             else:
                 skip_factor = i / float(args.precrop_iters_time) * len(i_train)
                 max_sample = max(int(skip_factor), 3)

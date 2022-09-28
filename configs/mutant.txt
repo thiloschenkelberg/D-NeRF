@@ -21,6 +21,8 @@ testskip = 1
 precrop_iters = 150
 precrop_iters_time = 1000
 precrop_frac = 0.5
+successive_training_set = True
+training_image_frequency = 10
 
 half_res = True
 do_half_precision = False
