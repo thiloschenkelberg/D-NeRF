@@ -470,33 +470,33 @@ def render_rays(ray_batch,
 
             z_vals = lower + (upper - lower) * t_rand
 
-        # Get N_samples pts along ray (eg. 64)
-        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
-        # If no additional samples should be calculated
-        if N_importance <= 0:
-            raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
-            rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    # Get N_samples pts along ray (eg. 64)
+    pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
+    if N_importance > 0: # Two sampling passes (N_samples then N_samples + N_importance)
+        if use_two_models_for_fine:
+            raw, position_delta_0 = network_query_fn(pts, viewdirs, frame_time, network_fn)
+            rgb_map_0, disp_map_0, acc_map_0, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
         else:
-            # Use separate model construct for sampling N_samples + N_importance
-            if use_two_models_for_fine:
-                raw, position_delta_0 = network_query_fn(pts, viewdirs, frame_time, network_fn)
-                rgb_map_0, disp_map_0, acc_map_0, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
-            else:
-                with torch.no_grad():
-                    raw, _ = network_query_fn(pts, viewdirs, frame_time, network_fn)
-                    _, _, _, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+            with torch.no_grad():
+                raw, _ = network_query_fn(pts, viewdirs, frame_time, network_fn)
+                _, _, _, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-            z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-            z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
-            z_samples = z_samples.detach()
-            z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+        z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
+        z_samples = z_samples.detach()
+        z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
+    else: # No additional samples
+        raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-    pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
+    
     run_fn = network_fn if network_fine is None else network_fine
     
     raw, position_delta = network_query_fn(pts, viewdirs, frame_time, run_fn)
     rgb_map, disp_map, acc_map, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+
     if DEBUG > 1:
         print('\nrender_rays()\npts shape: ', pts.shape,
               '\nviewdirs shape: ', viewdirs.shape,
@@ -505,8 +505,6 @@ def render_rays(ray_batch,
               '\nposition_delta shape: ', position_delta.shape,
               '\nrgb_map shape: ', rgb_map.shape,
               '\nweights shape: ', weights.shape)
-        
-    #print('\nDisp map: ', disp_map)
 
     # Returning results as dictionary
     # easy to extend (rgb0, disp0, etc.)
