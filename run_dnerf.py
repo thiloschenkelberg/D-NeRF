@@ -903,7 +903,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     # Successive training
     successive_training = args.successive_training_set
     # Make sure number of iterations is enough to work through training set successively instead of random
-    if N_iters <= args.training_image_frequency * len(i_train):
+    if N_iters <= args.training_image_frequency * len(i_train) or N_iters <= args.precrop_iters_time:
         successive_training = False
     
     # Start of training loop
