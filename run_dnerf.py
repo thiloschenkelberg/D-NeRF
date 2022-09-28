@@ -149,7 +149,7 @@ def create_tcnn_nerf(args):
     model = NeRF.get_by_name(args.nerf_type, lrate=args.lrate, zero_canonical=not args.not_zero_canonical, debug=DEBUG)
     assert type(model) == FastTemporalNerf, "Wrong nerf type in args."
 
-    # Get Adam optimizer
+    ### Adam optimizer
     # Optionally get model parameters including L2 regularization on networks
     # grad_vars = model.get_model_params()
     # optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, eps=1e-15, betas=(0.9,0.999))
@@ -157,7 +157,7 @@ def create_tcnn_nerf(args):
     if DEBUG > 0:
         print(optimizer.param_groups)
 
-    # Optionally use torch L2-loss
+    ### Optionally use torch L2-loss
     loss = None
     #loss = nn.MSELoss()
     
@@ -744,7 +744,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     parser = config_parser()
     args = parser.parse_args()
 
-    # Load data
+    ### Load data
     if args.dataset_type == 'blender':
         # images        = training, validation, test images
         # poses         = corresponding transformation matrices <-- origin and viewdir of camera
@@ -810,17 +810,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         with open(f, 'w') as file:
             file.write(open(args.config, 'r').read())
 
-    # Create nerf/temporal nerf model
-    # select embedder (eg. positional encoding..)
-    # create coarse network (network_fn in render_kwargs_train)
-    # create fine network (network_fine in render_kwargs_train)
-    # select optimizer (eg. Adam..)
-    #
-    # Create tcnn_nerf
-    # Grid encoding spatial coordinates
-    # Spherical harmonics encoding viewdirs
-    # Frequency encoding time
-    # return optimizer
+    ### Create NeRF model
     if args.nerf_type == "fast_temporal":
         render_kwargs_train, render_kwargs_test, start, optimizer, model, loss = create_tcnn_nerf(args)
     else:
@@ -890,7 +880,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
-    # Input no. of iterations manually or get from args
+    ### Input no. of iterations manually or get from args
     #iterations = int(input('\nInput no. of iterations: '))
     #N_iters = iterations + 1
     N_iters = args.N_iter + 1
@@ -1002,7 +992,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
-        # Loss calculation, backward propagation and optimizer step
+        ### Loss calculation, backward propagation and optimizer step
         #region TV Loss
         tv_loss = 0.
         if args.add_tv_loss:
@@ -1039,7 +1029,8 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         
         optimizer.zero_grad()
         
-        # Torch L2-loss calculation - uncomment in create_nerf() / create_tcnn_nerf()
+        ### Torch vs Self-implemented L2-loss calculation
+        # when using Torch version uncomment in create_nerf() / create_tcnn_nerf()
         #output = loss(rgb, target_s)
         output = img2mse(rgb, target_s)
         output = output + tv_loss
@@ -1089,7 +1080,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             torch.save(save_dict, path)
             print('Saved checkpoints at', path)
 
-        # PRINT
+        ### PRINT LOSS
         if i % args.i_print == 0:
             tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {output.item()} PSNR: {psnr.item()}"
             if args.add_tv_loss:
@@ -1113,7 +1104,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             del tv_loss
         del rgb, disp, acc, extras
 
-        # TENSORBOARD IMG
+        ### TENSORBOARD IMG SAVING
         if i%args.i_img==0:
             torch.cuda.empty_cache()
             # Log a rendered validation view to Tensorboard
@@ -1159,7 +1150,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
                 render_kwargs_test['c2w_staticcam'] = None
                 imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
-        # TESTSET
+        ### TESTSET
         if i%args.i_testset==0:
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             print('Testing poses shape...', poses[i_test].shape)
