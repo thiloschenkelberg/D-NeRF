@@ -1039,6 +1039,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         
         optimizer.zero_grad()
         
+        # Torch L2-loss calculation
         #output = loss(rgb, target_s)
         output = img2mse(rgb, target_s)
         output = output + tv_loss
