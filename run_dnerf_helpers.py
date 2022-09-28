@@ -80,7 +80,7 @@ def get_tcnn_embedding():
     with open("configs/_config_tcnn.json") as f:
         config=json.load(f)
         
-    embed_fn = tcnn.Encoding(3, config["grid_encoding"])
+    embed_fn = tcnn.Encoding(3, config["frequency_encoding"])
     input_ch = embed_fn.n_output_dims
     embeddirs_fn = tcnn.Encoding(3, config["sh_encoding"])
     input_ch_views = embeddirs_fn.n_output_dims
@@ -112,13 +112,13 @@ class FastTemporalNerf(nn.Module):
     
     # Create model with dx_-, density_-, and color_net aswell as (trainable) encoding
     def create_grid_model(self):
-        grid_encode = tcnn.Encoding(3, self.config["frequency_encoding"])
-        frequency_encode = tcnn.Encoding(1, self.config["frequency_encoding"])
-        dx_net = tcnn.Network(grid_encode.n_output_dims + frequency_encode.n_output_dims + 1, grid_encode.n_output_dims, self.config["cutlass_one"]) 
-        density_net = tcnn.Network(grid_encode.n_output_dims, 16, self.config["cutlass_one"]) 
+        pts_encode = tcnn.Encoding(3, self.config["grid_encoding"])
+        t_encode = tcnn.Encoding(1, self.config["frequency_encoding"])
+        dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims + 1, pts_encode.n_output_dims, self.config["cutlass_one"]) 
+        density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_one"]) 
         rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_two"]) 
         
-        return dx_net, density_net, rgb_net, grid_encode, frequency_encode
+        return dx_net, density_net, rgb_net, pts_encode, t_encode
         
     # Return  parameter list for all networks and encoding (if trainable)
     def get_optimizer(self):
@@ -254,7 +254,6 @@ class DirectTemporalNeRF(nn.Module):
         if cur_time == 0. and self.zero_canonical:
             dx = torch.zeros_like(input_pts[:, :3])
         else:
-            print('youre fucked')
             dx = self.query_time(input_pts, t, self._time, self._time_out)
             input_pts += dx
             #input_pts_dx = input_pts[:, :3] + dx
@@ -498,20 +497,24 @@ def plot_grad_flow(named_parameters):
     max_grads= []
     layers = []
     for n, p in named_parameters:
-        if(p.requires_grad) and ("bias" not in n):
-            layers.append(n)
-            if p.grad is not None:
-                ave_grads.append(p.grad.abs().mean().cpu())
-                max_grads.append(p.grad.abs().max().cpu())
-            else:
-                ave_grads.append(0.)
-                max_grads.append(0.)
+        if n == 'pts_encode.params':
+            if(p.requires_grad) and ("bias" not in n):
+                layers.append(n)
+                if p.grad is not None:
+                    print(p.grad.abs().max())
+                    print(p.grad.abs().mean())
+                    ave_grads.append(p.grad.abs().mean().cpu())
+                    max_grads.append(p.grad.abs().max().cpu())
+                else:
+                    print('null')
+                    ave_grads.append(0.)
+                    max_grads.append(0.)
     plt.bar(np.arange(len(max_grads)), max_grads, alpha=0.1, lw=1, color="c")
     plt.bar(np.arange(len(max_grads)), ave_grads, alpha=0.1, lw=1, color="b")
     plt.hlines(0, 0, len(ave_grads)+1, lw=2, color="k" )
     plt.xticks(range(0,len(ave_grads), 1), layers, rotation="vertical")
     plt.xlim(left=0, right=len(ave_grads))
-    plt.ylim(bottom = -0.001, top=0.02) # zoom in on the lower gradient regions
+    plt.ylim(bottom = 0., top=max_grads[0]) # zoom in on the lower gradient regions
     plt.xlabel("Layers")
     plt.ylabel("average gradient")
     plt.title("Gradient flow")

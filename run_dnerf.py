@@ -717,7 +717,7 @@ def config_parser():
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=50,
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=500,
+    parser.add_argument("--i_img",     type=int, default=501,
                         help='frequency of tensorboard image logging')
     parser.add_argument("--i_weights", type=int, default=10000,
                         help='frequency of weight ckpt saving')
@@ -1018,13 +1018,12 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             tv_loss = tv_loss * args.tv_loss_weight
         #endregion
         
+        optimizer.zero_grad()
+        
         #output = loss(rgb, target_s)
-
         output = img2mse(rgb, target_s)
         output = output + tv_loss
         psnr = mse2psnr(output)
-
-        optimizer.zero_grad()
 
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
@@ -1038,7 +1037,6 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             output.backward()
         
         #plot_grad_flow(model.named_parameters())
-        #input("stop")
 
         optimizer.step()
 
@@ -1071,6 +1069,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             torch.save(save_dict, path)
             print('Saved checkpoints at', path)
 
+        # PRINT
         if i % args.i_print == 0:
             tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {output.item()} PSNR: {psnr.item()}"
             if args.add_tv_loss:
@@ -1085,7 +1084,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             if args.add_tv_loss:
                 writer.add_scalar('tv', tv_loss.item(), i)
                 
-            print(optimizer.param_groups[1])
+            print(optimizer.param_groups[3])
 
         del output, psnr, target_s
         if 'rgb0' in extras:
@@ -1094,6 +1093,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             del tv_loss
         del rgb, disp, acc, extras
 
+        # TENSORBOARD IMG
         if i%args.i_img==0:
             torch.cuda.empty_cache()
             # Log a rendered validation view to Tensorboard
@@ -1132,23 +1132,20 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
 
-            # if args.use_viewdirs:
-            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
-            #     with torch.no_grad():
-            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            #     render_kwargs_test['c2w_staticcam'] = None
-            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
+            if args.use_viewdirs:
+                render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
+                with torch.no_grad():
+                    rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
+                render_kwargs_test['c2w_staticcam'] = None
+                imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
+        # TESTSET
         if i%args.i_testset==0:
-
-            # for param in embed_fn.parameters():
-            #     weights = param.to('cpu')
-            #     np.savetxt('./test/opt_out.txt', weights.detach().numpy())
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             print('Testing poses shape...', poses[i_test].shape)
             with torch.no_grad():
                 render_path(torch.Tensor(poses[i_test]).to(device), torch.Tensor(times[i_test]).to(device),
-                            hwf, 256*64, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                            hwf, 128*64, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
             
         if DEBUG:
