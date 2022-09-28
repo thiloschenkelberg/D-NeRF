@@ -894,7 +894,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     if N_iters <= args.training_image_frequency * len(i_train) or N_iters <= args.precrop_iters_time:
         successive_training = False
     
-    # Start of training loop
+    ### Start of training loop
     if DEBUG > 0:
         print('\nStarting training loop.')
     start = start + 1 # set start to 1
@@ -974,7 +974,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
                     print('\ntrain()\nrays_o/rays_d shape: ', rays_o.shape, '/', rays_d.shape,
                           '\nbatch_rays shape: ', batch_rays.shape)
 
-        #####  Core optimization loop  #####
+        ###  Core optimization loop  ###
         # render_kwargs_train = {
         #     'network_query_fn' : network_query_fn,
         #     'perturb' : args.perturb,
