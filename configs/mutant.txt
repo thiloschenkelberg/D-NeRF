@@ -10,6 +10,7 @@ use_viewdirs = True
 
 use_viewdirs = True
 white_bkgd = False
+lrate = 0.01
 lrate_decay = 500
 
 N_iter = 10000

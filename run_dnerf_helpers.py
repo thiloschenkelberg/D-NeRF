@@ -94,8 +94,8 @@ def get_tcnn_embedding():
 class FastTemporalNerf(nn.Module):
     def __init__(self, input_ch_pts=3, input_ch_view=3, input_ch_time=1,
                  output_ch_dx=3, output_ch_density=16, output_ch_color=3,
-                 zero_canonical=True,
-                 debug=False):
+                 lrate=1e-2, zero_canonical=True,
+                 debug=0):
         super(FastTemporalNerf, self).__init__()
         # Read tcnn config file
         with open("configs/_config_tcnn.json") as f:
@@ -106,8 +106,10 @@ class FastTemporalNerf(nn.Module):
         self.output_ch_dx=output_ch_dx
         self.output_ch_density=output_ch_density
         self.output_ch_color=output_ch_color
+        self.lrate=lrate
         self.zero_canonical=zero_canonical
         self.debug=debug
+        self._is_initialized=False
         self.dx_net, self.density_net, self.rgb_net, self.pts_encode, self.t_encode = self.create_grid_model()
     
     # Create model with dx_-, density_-, and color_net aswell as (trainable) encoding
@@ -117,17 +119,26 @@ class FastTemporalNerf(nn.Module):
         dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims + 1, pts_encode.n_output_dims, self.config["cutlass_one"]) 
         density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_one"]) 
         rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_two"]) 
-        
+
+        self._is_initialized = True
         return dx_net, density_net, rgb_net, pts_encode, t_encode
+
+    # Return params for all networks and encoding (if trainable)
+    def get_model_params(self):
+        assert self._is_initialized == True, 'Model is not initialized.'
+        return [{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
+                {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
+                {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
+                {'params': self.pts_encode.parameters()}]
         
-    # Return  parameter list for all networks and encoding (if trainable)
+    # Return optimizer for all networks and encoding (if trainable)
     def get_optimizer(self):
-        #return torch.optim.Adam(self.dx_net.parameters(),lr=1e-3, eps=1e-15, betas=(0.9,0.999))
+        assert self._is_initialized == True, 'Model is not initialized.'
         return torch.optim.Adam([{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.pts_encode.parameters()}
-                                ], lr=1e-2, eps=1e-15, betas=(0.9, 0.999))
+                                ], lr=self.lrate, eps=1e-15, betas=(0.9, 0.999))
     
     # Forward propagation
     def forward(self, x, t):
@@ -135,7 +146,7 @@ class FastTemporalNerf(nn.Module):
         input_pts, input_views = torch.split(x, [self.input_ch_pts,self.input_ch_view], dim=-1)
         assert len(torch.unique(t)) == 1, "Only accepts all points from same time"
         
-        if self.debug:
+        if self.debug > 2:
             # Save tensors to file in ./test/
             i_pts = input_pts.to('cpu')
             i_views = input_views.to('cpu')
@@ -169,7 +180,7 @@ class FastTemporalNerf(nn.Module):
         # Concatenate color_out with first output value of density_net
         rgba = torch.cat([rgb_out, density_out[...,:1]], dim=-1)
         
-        if self.debug:
+        if self.debug > 1: # Broken
             # Log tensor shapes
             print('\nforward()',
                   '\ninput_views shape: ', input_views.shape)

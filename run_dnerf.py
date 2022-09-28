@@ -17,7 +17,7 @@ except ImportError:
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
-DEBUG = False
+DEBUG = 0
 
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
@@ -144,16 +144,22 @@ def create_nerf(args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, loss
 
 def create_tcnn_nerf(args):
-    # Create FastTemporalNerf
-    print('\nDebug: ', DEBUG)
-    model = NeRF.get_by_name(args.nerf_type, debug=DEBUG)
+    # Initialize FastTemporalNerf Model
+    print('\nDebug level: ', DEBUG)
+    model = NeRF.get_by_name(args.nerf_type, lrate=args.lrate, zero_canonical=not args.not_zero_canonical, debug=DEBUG)
     assert type(model) == FastTemporalNerf, "Wrong nerf type in args."
+
     # Get Adam optimizer
-    #grad_vars = model.parameters()
-    #optimizer = torch.optim.Adam(params=grad_vars, eps=1e-15, lr=1e-2)
+    # Optionally get model parameters including L2 regularization on networks
+    # grad_vars = model.get_model_params()
+    # optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, eps=1e-15, betas=(0.9,0.999))
     optimizer = model.get_optimizer()
-    print(optimizer.param_groups)
-    loss = nn.MSELoss()
+    if DEBUG > 0:
+        print(optimizer.param_groups)
+
+    # Optionally use torch L2-loss
+    loss = None
+    #loss = nn.MSELoss()
     
     # Build network shortcut lambda function
     # really only shortcuts passing of netchunk size, but is consistent with original implementation
@@ -179,7 +185,6 @@ def create_tcnn_nerf(args):
     render_kwargs_test['perturb'] = False
     render_kwargs_test['raw_noise_std'] = 0.
 
-    #return render_kwargs_train, render_kwargs_test, start, optimizer
     return render_kwargs_train, render_kwargs_test, start, optimizer, model, loss
 
 def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=512*64,
@@ -216,7 +221,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
     outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_time)
-    if DEBUG:
+    if DEBUG > 1:
         print('\nrun_network()\nembedded shape: ', embedded.shape,
               '\nembedded_time shape: ', embedded_time.shape,
               '\noutputs_flat shape: ', outputs_flat.shape,
@@ -243,7 +248,7 @@ def run_tcnn_network(inputs, viewdirs, frame_time, fn, netchunk=512*64):
     # Batchified input to models
     # get rgba output and position delta
     outputs_flat, position_delta_flat = batchify(fn, netchunk)(inputs_flat, input_frame_time_flat)
-    if DEBUG:
+    if DEBUG > 1:
         print('\nrun_tcnn_network()\ninputs_flat shape: ', inputs_flat.shape,
               '\ninput_frame_time_flat shape: ', input_frame_time_flat.shape,
               '\noutputs_flat shape: ', outputs_flat.shape,
@@ -492,7 +497,7 @@ def render_rays(ray_batch,
     
     raw, position_delta = network_query_fn(pts, viewdirs, frame_time, run_fn)
     rgb_map, disp_map, acc_map, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
-    if DEBUG:
+    if DEBUG > 1:
         print('\nrender_rays()\npts shape: ', pts.shape,
               '\nviewdirs shape: ', viewdirs.shape,
               '\nframe_time shape: ', frame_time.shape,
@@ -521,9 +526,10 @@ def render_rays(ray_batch,
         if z_samples is not None:
             ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
 
-    for k in ret:
-        if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
-            print(f"! [Numerical Error] {k} contains nan or inf.")
+    if DEBUG > 1:
+        for k in ret:
+            if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()):
+                print(f"! [Numerical Error] {k} contains nan or inf.")
 
     return ret
 
@@ -584,7 +590,7 @@ def render(H, W, focal, chunk=512*64, rays=None, c2w=None, ndc=True,
     if use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
 
-    if DEBUG:
+    if DEBUG > 1:
         print('\nrender()\nrays shape: ', rays.shape)
     
     # Render and reshape
@@ -746,7 +752,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
         images, poses, times, render_poses, render_times, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
         i_train, i_val, i_test = i_split
         
-        if DEBUG: 
+        if DEBUG > 0: 
             print('\nLoaded blender data:',
                 '\nimages: ', type(images), images.shape,
                 '\nposes: ', type(poses), poses.shape,
@@ -818,7 +824,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
     assert render_kwargs_train is not None, "Creating nerf failed."
         
     global_step = start
-    if DEBUG:
+    if DEBUG > 0:
         print('Created NeRF model.')
 
     bds_dict = {
@@ -891,11 +897,11 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
     writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
     
     # Start of training loop
-    if DEBUG:
+    if DEBUG > 0:
         print('\nStarting training loop.')
     start = start + 1 # set start to 1
     for i in trange(start, N_iters):
-        if DEBUG:
+        if DEBUG > 1:
             print('\nIteration ', i)
         time0 = time.time()
 
@@ -948,7 +954,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
                              torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW),
                              indexing='ij'
                              ), -1)
-                    if i == start and DEBUG:
+                    if i == start and DEBUG > 0:
                         print(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")                
                 else:
                     coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W), indexing='ij'), -1)  # (H, W, 2)
@@ -963,7 +969,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
                 rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 batch_rays = torch.stack([rays_o, rays_d], 0) # (2, N_rand, 3)
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-                if DEBUG:
+                if DEBUG > 1:
                     print('\ntrain()\nrays_o/rays_d shape: ', rays_o.shape, '/', rays_d.shape,
                           '\nbatch_rays shape: ', batch_rays.shape)
 
@@ -1042,11 +1048,11 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
-        # decay_rate = 0.1
-        # decay_steps = args.lrate_decay * 1000
-        # new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
-        # for param_group in optimizer.param_groups:
-        #     param_group['lr'] = new_lrate
+        decay_rate = 0.1
+        decay_steps = args.lrate_decay * 1000
+        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
         ################################
 
         dt = time.time()-time0
@@ -1148,7 +1154,7 @@ def train(): # python3 run_dnerf.py --config configs/mutant.txt
                             hwf, 128*64, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
             
-        if DEBUG:
+        if DEBUG > 1:
             print('\nIteration ', i, ' completed. Learned from training example ',tr_ex,'.')
             input('Press Enter to start next iteration.')
 
