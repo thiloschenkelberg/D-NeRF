@@ -148,13 +148,15 @@ class FastTemporalNerf(nn.Module):
         
         if self.debug > 2:
             # Save tensors to file in ./test/
-            i_pts = input_pts.to('cpu')
-            i_views = input_views.to('cpu')
-            i_time = t.to('cpu')
+            i_pts = input_pts.cpu()
+            i_views = input_views.cpu()
+            i_time = t.cpu()
             np.savetxt('./test/input_pts.txt', i_pts.numpy())
             np.savetxt('./test/input_views.txt', i_views.numpy())
             np.savetxt('./test/time.txt', i_time.numpy())
         
+        ### TODO: check if using dx_net 
+        # in all cases is possible/effective
         input_pts_enc = self.pts_encode(input_pts)
         
         cur_time = t[0, 0]
@@ -180,33 +182,32 @@ class FastTemporalNerf(nn.Module):
         # Concatenate color_out with first output value of density_net
         rgba = torch.cat([rgb_out, density_out[...,:1]], dim=-1)
         
-        if self.debug > 1: # Broken
+        if self.debug > 1:
             # Log tensor shapes
             print('\nforward()',
                   '\ninput_views shape: ', input_views.shape)
             if cur_time != 0. and self.zero_canonical:
-                print('input_dx shape: ', input_dx.shape)
-            else:
-                print('cur_time is 0.')
-            print('input_alpha shape: ', input_pts.shape,
-                  '\ninput_rgb shape: ', input_rgb.shape)
+                print('dx in shape: ', input_dx.shape)
+            print('density in shape: ', input_pts_enc.shape,
+                  '\nrgb in shape: ', input_rgb.shape)
             
+            if self.debug > 2:
             # Save tensors to file in ./test/
-            if cur_time != 0. and self.zero_canonical:
-                i_dx = input_dx.to('cpu')
-                np.savetxt('./test/input_dx.txt', i_dx.numpy())
-                o_dx = dx_out.to('cpu')
-                np.savetxt('./test/dx_out.txt', o_dx.numpy())
-                i_pts_dx = input_pts.to('cpu')
-                np.savetxt('./test/input_ptsdx.txt', i_pts_dx.numpy())
-            a_out = alpha_out.to('cpu')
-            np.savetxt('./test/alpha_out.txt', a_out.numpy())
-            i_rgb = input_rgb.to('cpu')
-            np.savetxt('./test/input_rgb.txt', i_rgb.numpy())
-            o_rgb = rgb_out.to('cpu')
-            np.savetxt('./test/rgb_out.txt', o_rgb.numpy())
-            o_rgba = rgba_out.to('cpu')
-            np.savetxt('./test/rgba_out.txt', o_rgba.numpy())
+                if cur_time != 0. and self.zero_canonical:
+                    i_dx = input_dx.cpu()
+                    np.savetxt('./test/input_dx.txt', i_dx.numpy())
+                    o_dx = dx_out.cpu()
+                    np.savetxt('./test/dx_out.txt', o_dx.numpy())
+                i_dense = input_pts_enc.cpu()
+                np.savetxt('./test/density_in.txt', i_dense.numpy())
+                o_dense = density_out.cpu()
+                np.savetxt('./test/density_out.txt', density_out.numpy())
+                i_rgb = input_rgb.cpu()
+                np.savetxt('./test/input_rgb.txt', i_rgb.numpy())
+                o_rgb = rgb_out.cpu()
+                np.savetxt('./test/rgb_out.txt', o_rgb.numpy())
+                o_rgba = rgba.cpu()
+                np.savetxt('./test/rgba_out.txt', o_rgba.numpy())
         
         return rgba,dx_out
 
