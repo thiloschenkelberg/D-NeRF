@@ -735,7 +735,7 @@ def config_parser():
     return parser
 
 
-def train(): # python3 run_dnerf.py --config configs/mutant.txt
+def train(): # python3 run_dnerf.py --config configs/config.txt
 
     parser = config_parser()
     args = parser.parse_args()
