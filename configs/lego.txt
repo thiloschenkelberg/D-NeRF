@@ -12,25 +12,25 @@ white_bkgd = False
 lrate = 0.01
 lrate_decay = 500
 
-N_iter = 2500
+N_iter = 200
 N_samples = 64
 N_importance = 128
-N_rand = 4096
+N_rand = 500
 testskip = 1
 
 precrop_iters = 0
-precrop_iters_time = 1500
+precrop_iters_time = 500
 precrop_frac = 0.5
 successive_training_set = True
-training_image_frequency = 5
+training_image_frequency = 10
 
 half_res = True
 do_half_precision = False
 
 use_ckpts = False
 
-i_print = 50
-i_img = 100
+i_print = 500
+i_img = 10000
 i_weights = 10000
-i_testset = 2000
+i_testset = 500
 i_video = 10000

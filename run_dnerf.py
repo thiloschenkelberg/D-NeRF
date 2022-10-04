@@ -147,12 +147,14 @@ def create_tcnn_nerf(args):
     # Initialize FastTemporalNerf Model
     print('\nDebug level: ', DEBUG)
     model = NeRF.get_by_name(args.nerf_type, lrate=args.lrate, zero_canonical=not args.not_zero_canonical, debug=DEBUG)
-    assert type(model) == FastTemporalNerf, "Wrong nerf type in args."
+    assert type(model) is FastTemporalNerf, "Wrong nerf type in args."
 
     ### Adam optimizer
     # Optionally get model parameters including L2 regularization on networks
     # grad_vars = model.get_model_params()
-    # optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, eps=1e-15, betas=(0.9,0.999))
+    # grad_vars = model.parameters()
+    # optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, eps=1e-15, betas=(0.9,0.999))\
+    # optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9,0.999))
     optimizer = model.get_optimizer()
     if DEBUG > 0:
         print(optimizer.param_groups)
@@ -187,7 +189,7 @@ def create_tcnn_nerf(args):
 
     return render_kwargs_train, render_kwargs_test, start, optimizer, model, loss
 
-def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=512*64,
+def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=256*64,
                 embd_time_discr=True):
     """Prepares inputs and applies network 'fn'.
     inputs: N_rays x N_points_per_ray x 3
@@ -230,7 +232,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
     position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
     return outputs, position_delta
 
-def run_tcnn_network(inputs, viewdirs, frame_time, fn, netchunk=512*64):
+def run_tcnn_network(inputs, viewdirs, frame_time, fn, netchunk=256*64):
     assert len(torch.unique(frame_time)) == 1, "Only accepts all points from same time"
     
     # Flatten inputs from (N_rays,Samples,Coords) -> (Indice,Coords)
@@ -262,18 +264,18 @@ def batchify(fn, chunk):
     """
     if chunk is None:
         return fn
-    def ret(inputs, input_time):
-        num_batches = inputs.shape[0]
+    def ret(pts, frame_time):
+        num_batches = pts.shape[0]
         out_list = []
         dx_list = []
         for i in range(0, num_batches, chunk):
-            out,dx = fn(inputs[i:i+chunk], input_time[i:i+chunk])
+            out,dx = fn(pts[i:i+chunk], frame_time[i:i+chunk])
             out_list += [out]
             dx_list += [dx]
         return torch.cat(out_list, 0), torch.cat(dx_list, 0)
     return ret
 
-def batchify_rays(rays_flat, chunk=512*64, **kwargs):
+def batchify_rays(rays_flat, chunk=256*64, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     Usually 500 rays with 12 fields
     """
@@ -444,7 +446,6 @@ def render_rays(ray_batch,
     rgb_map_0, disp_map_0, acc_map_0, position_delta_0 = None, None, None, None
 
     if z_vals is None:
-        # here
         t_vals = torch.linspace(0., 1., steps=N_samples)
         if not lindisp:
             # here
@@ -469,6 +470,8 @@ def render_rays(ray_batch,
                 t_rand = torch.Tensor(t_rand)
 
             z_vals = lower + (upper - lower) * t_rand
+    else:
+        print('zvals was not none.')
 
     # Get N_samples pts along ray (eg. 64)
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
@@ -487,10 +490,6 @@ def render_rays(ray_batch,
         z_samples = z_samples.detach()
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
-    else: # No additional samples
-        raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
-
     
     run_fn = network_fn if network_fine is None else network_fine
     
@@ -531,7 +530,7 @@ def render_rays(ray_batch,
 
     return ret
 
-def render(H, W, focal, chunk=512*64, rays=None, c2w=None, ndc=True,
+def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
                   near=0., far=1., frame_time=None,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
@@ -618,7 +617,7 @@ def config_parser():
     # training options
     parser.add_argument("--nerf_type", type=str, default="original",
                         help='nerf network type')
-    parser.add_argument("--N_iter", type=int, default=500000,
+    parser.add_argument("--N_iter", type=int, default=1000,
                         help='num training iterations')
     parser.add_argument("--netdepth", type=int, default=8, 
                         help='layers in network')
@@ -628,7 +627,7 @@ def config_parser():
                         help='layers in fine network')
     parser.add_argument("--netwidth_fine", type=int, default=256, 
                         help='channels per layer in fine network')
-    parser.add_argument("--N_rand", type=int, default=32*32*4, 
+    parser.add_argument("--N_rand", type=int, default=500, 
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--do_half_precision", action='store_true',
                         help='do half precision training and inference')
@@ -636,9 +635,9 @@ def config_parser():
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
-    parser.add_argument("--chunk", type=int, default=512*64, 
+    parser.add_argument("--chunk", type=int, default=256*64, 
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=512*64, 
+    parser.add_argument("--netchunk", type=int, default=256*64, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true', 
                         help='only take random rays from 1 image at a time')
@@ -725,11 +724,11 @@ def config_parser():
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=50,
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=501,
+    parser.add_argument("--i_img",     type=int, default=500,
                         help='frequency of tensorboard image logging')
     parser.add_argument("--i_weights", type=int, default=10000,
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=500,
+    parser.add_argument("--i_testset", type=int, default=100,
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=200000,
                         help='frequency of render_poses video saving')
@@ -756,15 +755,15 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         
         if DEBUG > 0: 
             print('\nLoaded blender data:',
-                '\nimages: ', type(images), images.shape,
-                '\nposes: ', type(poses), poses.shape,
-                '\ntimes: ', type(times), times.shape,
-                '\nrender_poses: ', type(render_poses), render_poses.shape,
-                '\nrender_times: ', type(render_times), render_times.shape,
-                '\nheight: ', hwf[0], ' width: ', hwf[1], ' focal: ', hwf[2],
-                '\ni_train: ', i_split[0].shape,
-                ' i_val: ', i_split[1].shape,
-                ' i_test: ', i_split[2].shape,'\n')
+                  '\nimages: ', type(images), images.shape,
+                  '\nposes: ', type(poses), poses.shape,
+                  '\ntimes: ', type(times), times.shape,
+                  '\nrender_poses: ', type(render_poses), render_poses.shape,
+                  '\nrender_times: ', type(render_times), render_times.shape,
+                  '\nheight: ', hwf[0], ' width: ', hwf[1], ' focal: ', hwf[2],
+                  '\ni_train: ', i_split[0].shape,
+                  ' i_val: ', i_split[1].shape,
+                  ' i_test: ', i_split[2].shape,'\n')
         
         # near and far plane
         near = 2.
@@ -924,13 +923,13 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             # img_i = selected training example
             if i >= args.precrop_iters_time:
                 img_i = np.random.choice(i_train)
-            elif successive_training:
-                img_i = i_train[int(i/args.training_image_frequency)]
-                print(img_i)
+            # elif successive_training:
+            #     img_i = i_train[int(i/args.training_image_frequency)]
             else:
-                skip_factor = i / float(args.precrop_iters_time) * len(i_train)
-                max_sample = max(int(skip_factor), 3)
-                img_i = np.random.choice(i_train[:max_sample])
+                # skip_factor = i / float(args.precrop_iters_time) * len(i_train)
+                # max_sample = max(int(skip_factor), 3)
+                # img_i = np.random.choice(i_train[:max_sample])
+                img_i = 1
             tr_ex = img_i
 
             #target     = comparison for predicted RGB colors for selected training example img_i
@@ -971,8 +970,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
                 batch_rays = torch.stack([rays_o, rays_d], 0) # (2, N_rand, 3)
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 if DEBUG > 1:
-                    print('\ntrain()\nrays_o/rays_d shape: ', rays_o.shape, '/', rays_d.shape,
-                          '\nbatch_rays shape: ', batch_rays.shape)
+                    print(f"\ntrain()\nrays_o/rays_d shape: {rays_o.shape} / {rays_d.shape}\nbatch_rays shape: {batch_rays.shape}")
 
         ###  Core optimization loop  ###
         # render_kwargs_train = {
@@ -985,7 +983,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         #     'white_bkgd' : args.white_bkgd,
         #     'raw_noise_std' : args.raw_noise_std,
         #     'use_two_models_for_fine' : args.use_two_models_for_fine,
-        # }       
+        # }   
         rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays, frame_time=frame_time,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
@@ -1031,7 +1029,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         # when using Torch version uncomment in create_nerf() / create_tcnn_nerf()
         #output = loss(rgb, target_s)
         output = img2mse(rgb, target_s)
-        output = output + tv_loss
+        #output = output + tv_loss
         psnr = mse2psnr(output)
 
         if 'rgb0' in extras:
@@ -1079,7 +1077,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             print('Saved checkpoints at', path)
 
         ### PRINT LOSS
-        if i % args.i_print == 0:
+        if (i + 1) % args.i_print == 0:
             tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {output.item()} PSNR: {psnr.item()}"
             if args.add_tv_loss:
                 tqdm_txt += f" TV: {tv_loss.item()}"
@@ -1111,7 +1109,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             pose = poses[img_i, :3,:4]
             frame_time = times[img_i]
             with torch.no_grad():
-                rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose, frame_time=frame_time,
+                rgb, disp, acc, extras = render(H, W, focal, chunk=256*64, c2w=pose, frame_time=frame_time,
                                                     **render_kwargs_test)
 
             psnr = mse2psnr(img2mse(rgb, target))
@@ -1150,15 +1148,16 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
 
         ### TESTSET
         if i%args.i_testset==0:
+            #torch.cuda.empty_cache()
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             print('Testing poses shape...', poses[i_test].shape)
             with torch.no_grad():
                 render_path(torch.Tensor(poses[i_test]).to(device), torch.Tensor(times[i_test]).to(device),
-                            hwf, 128*64, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                            hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
             
         if DEBUG > 1:
-            print('\nIteration ', i, ' completed. Learned from training example ',tr_ex,'.')
+            print(f"\nIteration {i} completed. Learned from training example {tr_ex}.")
             input('Press Enter to start next iteration.')
 
         global_step += 1

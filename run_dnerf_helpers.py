@@ -114,7 +114,7 @@ class FastTemporalNerf(nn.Module):
     
     # Create model with dx_-, density_-, and color_net aswell as (trainable) encoding
     def create_grid_model(self):
-        pts_encode = tcnn.Encoding(3, self.config["grid_encoding"])
+        pts_encode = tcnn.Encoding(3, self.config["frequency_encoding"])
         t_encode = tcnn.Encoding(1, self.config["frequency_encoding"])
         dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims + 1, pts_encode.n_output_dims, self.config["cutlass_one"]) 
         density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_one"]) 
@@ -125,7 +125,7 @@ class FastTemporalNerf(nn.Module):
 
     # Return params for all networks and encoding (if trainable)
     def get_model_params(self):
-        assert self._is_initialized == True, 'Model is not initialized.'
+        assert self._is_initialized is True, 'Model is not initialized.'
         return [{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
                 {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
                 {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
@@ -133,7 +133,7 @@ class FastTemporalNerf(nn.Module):
         
     # Return optimizer for all networks and encoding (if trainable)
     def get_optimizer(self):
-        assert self._is_initialized == True, 'Model is not initialized.'
+        assert self._is_initialized is True, 'Model is not initialized.'
         return torch.optim.Adam([{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
@@ -157,28 +157,30 @@ class FastTemporalNerf(nn.Module):
         
         ### TODO: check if using dx_net 
         # in all cases is possible/effective
-        input_pts_enc = self.pts_encode(input_pts)
         
+        input_pts_encoded = self.pts_encode(input_pts)
         cur_time = t[0, 0]
         if cur_time == 0. and self.zero_canonical:
             # No positional delta at t = 0
             # if canonical space is also at t = 0
             dx_out = torch.zeros_like(input_pts)
+            density_in = input_pts_encoded
         else:
-            # Encode time input and concatenate original time input
-            t_enc = torch.cat([t, self.t_encode(t)], dim=-1)
+            # Encode time input and concatenate to original time input
+            time_encoded = torch.cat([t, self.t_encode(t)], dim=-1)
             # Concatenate encoded input pts with encoded time
-            input_dx = torch.cat([input_pts_enc, t_enc], dim=-1)
+            dx_in = torch.cat([input_pts_encoded, time_encoded], dim=-1)
             # Use dx_net
-            dx_out = self.dx_net(input_dx)
-            # Add positional delta dx (vector) to pts
-            input_pts_enc += dx_out
+            dx_out = self.dx_net(dx_in)
+            density_in = input_pts_encoded + dx_out
+        # Add positional delta dx (vector) to pts
+        #density_in = input_pts_encoded + dx_out
         # Use density_net
-        density_out = self.density_net(input_pts_enc)
+        density_out = self.density_net(density_in)
         # Concatenate density_net output (16) with views (3) 
-        input_rgb = torch.cat([density_out, input_views], dim=-1)
+        rgb_in = torch.cat([density_out, input_views], dim=-1)
         # Use color_net (19in, 3out) internally encoded to view(16) + density(16) = 32in
-        rgb_out = self.rgb_net(input_rgb)
+        rgb_out = self.rgb_net(rgb_in)
         # Concatenate color_out with first output value of density_net
         rgba = torch.cat([rgb_out, density_out[...,:1]], dim=-1)
         
@@ -187,23 +189,23 @@ class FastTemporalNerf(nn.Module):
             print('\nforward()',
                   '\ninput_views shape: ', input_views.shape)
             if cur_time != 0. and self.zero_canonical:
-                print('dx in shape: ', input_dx.shape)
-            print('density in shape: ', input_pts_enc.shape,
-                  '\nrgb in shape: ', input_rgb.shape)
+                print('dx in shape: ', dx_in.shape)
+            print('density in shape: ', density_in.shape,
+                  '\nrgb in shape: ', rgb_in.shape)
             
             if self.debug > 2:
             # Save tensors to file in ./test/
                 if cur_time != 0. and self.zero_canonical:
-                    i_dx = input_dx.cpu()
-                    np.savetxt('./test/input_dx.txt', i_dx.numpy())
+                    i_dx = dx_in.cpu()
+                    np.savetxt('./test/dx_in.txt', i_dx.numpy())
                     o_dx = dx_out.cpu()
                     np.savetxt('./test/dx_out.txt', o_dx.numpy())
-                i_dense = input_pts_enc.cpu()
+                i_dense = density_in.cpu()
                 np.savetxt('./test/density_in.txt', i_dense.numpy())
                 o_dense = density_out.cpu()
-                np.savetxt('./test/density_out.txt', density_out.numpy())
-                i_rgb = input_rgb.cpu()
-                np.savetxt('./test/input_rgb.txt', i_rgb.numpy())
+                np.savetxt('./test/density_out.txt', o_dense.numpy())
+                i_rgb = rgb_in.cpu()
+                np.savetxt('./test/rgb_in.txt', i_rgb.numpy())
                 o_rgb = rgb_out.cpu()
                 np.savetxt('./test/rgb_out.txt', o_rgb.numpy())
                 o_rgba = rgba.cpu()
