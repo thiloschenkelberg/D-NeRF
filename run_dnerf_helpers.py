@@ -114,18 +114,18 @@ class FastTemporalNerf(nn.Module):
     
     # Create model with dx_-, density_-, and color_net aswell as (trainable) encoding
     def create_grid_model(self):
-        pts_encode = tcnn.Encoding(3, self.config["frequency_encoding"])
-        t_encode = tcnn.Encoding(1, self.config["frequency_encoding"])
+        pts_encode = tcnn.Encoding(3, self.config["grid_encoding"])
+        t_encode = tcnn.Encoding(1, self.config["frequency_encoding_4"])
         dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims + 1, pts_encode.n_output_dims, self.config["cutlass_one"]) 
         density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_one"]) 
-        rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_two"]) 
+        rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_two"])
 
         self._is_initialized = True
         return dx_net, density_net, rgb_net, pts_encode, t_encode
 
     # Return params for all networks and encoding (if trainable)
     def get_model_params(self):
-        assert self._is_initialized is True, 'Model is not initialized.'
+        assert self._is_initialized is True, 'Model has not been initialized.'
         return [{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
                 {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
                 {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
@@ -133,7 +133,7 @@ class FastTemporalNerf(nn.Module):
         
     # Return optimizer for all networks and encoding (if trainable)
     def get_optimizer(self):
-        assert self._is_initialized is True, 'Model is not initialized.'
+        assert self._is_initialized is True, 'Model has not been initialized.'
         return torch.optim.Adam([{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
@@ -211,6 +211,8 @@ class FastTemporalNerf(nn.Module):
                 o_rgba = rgba.cpu()
                 np.savetxt('./test/rgba_out.txt', o_rgba.numpy())
         
+        print(dx_out.shape)
+        input()
         return rgba,dx_out
 
     __call__ = forward

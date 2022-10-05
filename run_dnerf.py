@@ -272,6 +272,8 @@ def batchify(fn, chunk):
             out,dx = fn(pts[i:i+chunk], frame_time[i:i+chunk])
             out_list += [out]
             dx_list += [dx]
+        for i in enumerate(dx_list):
+            print(i[1].shape)
         return torch.cat(out_list, 0), torch.cat(dx_list, 0)
     return ret
 
@@ -303,9 +305,8 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-    # calculate alpha back from log space -> torch.exp
-    raw2alphafn = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
-    raw2alpha = lambda raw, dists: 1.-torch.exp(-raw*dists)
+    # calculate alpha back from log space with torch.exp
+    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
     dists = z_vals[...,1:] - z_vals[...,:-1]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
@@ -315,10 +316,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     #sigmoid activation of rgb output
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
-    #print(raw[...,:3].shape)
-    #print(rgb.shape)
     
-    #rgb = raw[...,:3]
     noise = 0.
     if raw_noise_std > 0.:
         noise = torch.randn(raw[...,3].shape) * raw_noise_std
@@ -329,15 +327,10 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
 
-    alpha = raw2alphafn(raw[...,3] + noise, dists)  # [N_rays, N_samples]
-    #print(raw[...,3])
-    #print(alpha.shape)
+    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
-    #print(weights.shape)
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
-    #rgb_print = rgb_map.cpu()
-    #np.savetxt('./test/rgb_print_ac.txt', rgb_print.numpy())
 
     depth_map = torch.sum(weights * z_vals, -1)
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
@@ -347,7 +340,6 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         rgb_map = rgb_map + (1.-acc_map[...,None])
         # rgb_map = rgb_map + torch.cat([acc_map[..., None] * 0, acc_map[..., None] * 0, (1. - acc_map[..., None])], -1)
     
-    #input('stop')
     return rgb_map, disp_map, acc_map, weights, depth_map
 
 def render_path(render_poses, render_times, hwf, chunk, render_kwargs, gt_imgs=None, savedir=None,
@@ -491,9 +483,9 @@ def render_rays(ray_batch,
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
     
-    run_fn = network_fn if network_fine is None else network_fine
+    #run_fn = network_fn if network_fine is None else network_fine
     
-    raw, position_delta = network_query_fn(pts, viewdirs, frame_time, run_fn)
+    raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
     rgb_map, disp_map, acc_map, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     if DEBUG > 1:
@@ -684,6 +676,8 @@ def config_parser():
                         help='number of steps to train on central time')
     parser.add_argument("--precrop_frac", type=float,
                         default=.5, help='fraction of img taken for central crops')
+    parser.add_argument("--precrop_iters_begin", type=int, default=0,
+                        help='number of steps to train on first image')
     parser.add_argument("--successive_training_set", action="store_true",
                         help='train images in strict succession')
     parser.add_argument("--training_image_frequency", type=int, default=1,
@@ -888,14 +882,15 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
 
     # Successive training
-    successive_training = args.successive_training_set
-    # Make sure number of iterations is enough to work through training set successively instead of random
-    if N_iters <= args.training_image_frequency * len(i_train) or N_iters <= args.precrop_iters_time:
-        successive_training = False
+    # successive_training = args.successive_training_set
+    # # Make sure number of iterations is enough to work through training set successively instead of random
+    # if N_iters <= args.training_image_frequency * len(i_train) or N_iters <= args.precrop_iters_time:
+    #     successive_training = False
     
     ### Start of training loop
     if DEBUG > 0:
         print('\nStarting training loop.')
+    torch.cuda.empty_cache()
     start = start + 1 # set start to 1
     for i in trange(start, N_iters):
         if DEBUG > 1:
@@ -919,17 +914,17 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
                 i_batch = 0
         #endregion
         else:
-            # Random from one image
-            # img_i = selected training example
+            # Select Training Example Random from one image
             if i >= args.precrop_iters_time:
                 img_i = np.random.choice(i_train)
             # elif successive_training:
             #     img_i = i_train[int(i/args.training_image_frequency)]
+            elif i >= args.precrop_iters_begin:
+                skip_factor = (i / float(args.precrop_iters_time)) * len(i_train)
+                max_sample = max(int(skip_factor), 3)
+                img_i = np.random.choice(i_train[:max_sample])
             else:
-                # skip_factor = i / float(args.precrop_iters_time) * len(i_train)
-                # max_sample = max(int(skip_factor), 3)
-                # img_i = np.random.choice(i_train[:max_sample])
-                img_i = 1
+                img_i = 0
             tr_ex = img_i
 
             #target     = comparison for predicted RGB colors for selected training example img_i
@@ -1078,7 +1073,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
 
         ### PRINT LOSS
         if (i + 1) % args.i_print == 0:
-            tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {output.item()} PSNR: {psnr.item()}"
+            tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {output.item()} PSNR: {psnr.item()} on IMG: {img_i}"
             if args.add_tv_loss:
                 tqdm_txt += f" TV: {tv_loss.item()}"
             tqdm.write(tqdm_txt)
@@ -1091,7 +1086,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             if args.add_tv_loss:
                 writer.add_scalar('tv', tv_loss.item(), i)
                 
-            print(optimizer.param_groups[3])
+            #print(optimizer.param_groups[3])
 
         del output, psnr, target_s
         if 'rgb0' in extras:
@@ -1153,7 +1148,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             print('Testing poses shape...', poses[i_test].shape)
             with torch.no_grad():
                 render_path(torch.Tensor(poses[i_test]).to(device), torch.Tensor(times[i_test]).to(device),
-                            hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                            hwf, 256*64, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
             
         if DEBUG > 1:
