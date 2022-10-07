@@ -574,9 +574,9 @@ def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
     rays_d = torch.reshape(rays_d, [-1,3]).float()
     
     frame_time = torch.reshape(frame_time, (frame_time.size(dim=0), 1))
+    #frame_time = frame_time * torch.ones_like(rays_d[...,:1])
 
     near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
-    #frame_time = frame_time * torch.ones_like(rays_d[...,:1])
     rays = torch.cat([rays_o, rays_d, near, far, frame_time], -1)
     print(rays.shape)
     if use_viewdirs:
@@ -938,7 +938,8 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             #frame_time = timestamp of selected training example
             target = images[img_i]
             pose = poses[img_i, :3, :4]
-            frame_time = times[img_i]
+            frame_time = torch.empty(N_rand).fill_(times[img_i])
+            
             if N_rand is not None:
                 #get H x W ray origins, and directions from height, width, focal and camera position
                 #c2w (camera to world) transformation
