@@ -50,7 +50,7 @@ class Embedder:
                 #print('\noutdim: ', out_dim)
                     
         self.embed_fns = embed_fns
-        self.out_dim = out_dim
+        self.out_dim = out_dim + d
         
     def embed(self, inputs):
         return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
@@ -115,7 +115,7 @@ class FastTemporalNerf(nn.Module):
     # Create model with dx_-, density_-, and color_net aswell as (trainable) encoding
     def create_grid_model(self):
         pts_encode = tcnn.Encoding(3, self.config["grid_encoding"])
-        t_encode = tcnn.Encoding(1, self.config["frequency_encoding_4"])
+        t_encode = tcnn.Encoding(1, self.config["frequency_encoding"])
         dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims + 1, pts_encode.n_output_dims, self.config["cutlass_one"]) 
         density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_one"]) 
         rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_two"])
@@ -159,11 +159,11 @@ class FastTemporalNerf(nn.Module):
         # in all cases is possible/effective
         
         input_pts_encoded = self.pts_encode(input_pts)
+        
         cur_time = t[0, 0]
         if cur_time == 0. and self.zero_canonical:
             # No positional delta at t = 0
             # if canonical space is also at t = 0
-            dx_out = torch.zeros_like(input_pts)
             density_in = input_pts_encoded
         else:
             # Encode time input and concatenate to original time input
@@ -173,13 +173,14 @@ class FastTemporalNerf(nn.Module):
             # Use dx_net
             dx_out = self.dx_net(dx_in)
             density_in = input_pts_encoded + dx_out
+            print('time')
         # Add positional delta dx (vector) to pts
         #density_in = input_pts_encoded + dx_out
         # Use density_net
         density_out = self.density_net(density_in)
         # Concatenate density_net output (16) with views (3) 
         rgb_in = torch.cat([density_out, input_views], dim=-1)
-        # Use color_net (19in, 3out) internally encoded to view(16) + density(16) = 32in
+        # Use color_net (19in, 3out) internally encoded to density(16) + view(16) = 32in
         rgb_out = self.rgb_net(rgb_in)
         # Concatenate color_out with first output value of density_net
         rgba = torch.cat([rgb_out, density_out[...,:1]], dim=-1)
@@ -211,8 +212,7 @@ class FastTemporalNerf(nn.Module):
                 o_rgba = rgba.cpu()
                 np.savetxt('./test/rgba_out.txt', o_rgba.numpy())
         
-        print(dx_out.shape)
-        input()
+        dx_out = torch.zeros_like(input_pts)
         return rgba,dx_out
 
     __call__ = forward

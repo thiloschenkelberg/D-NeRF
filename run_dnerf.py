@@ -1,6 +1,7 @@
 import os
 import imageio
 import time
+from numpy import Infinity
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
 import sys
@@ -50,7 +51,7 @@ def create_nerf(args):
                  use_viewdirs=args.use_viewdirs,
                  zero_canonical=not args.not_zero_canonical).to(device)
     grad_vars = list(model.parameters())
-    model.add_embedding(embed_fn)
+    #model.add_embedding(embed_fn)
 
     #region Fine model
     model_fine = None
@@ -60,15 +61,15 @@ def create_nerf(args):
                           input_ch_views=input_ch_views, input_ch_time=input_ch_time,
                           use_viewdirs=args.use_viewdirs,
                           zero_canonical=not args.not_zero_canonical).to(device)
-        model_fine.add_embedding(embed_fn)
+        #model_fine.add_embedding(embed_fn)
         grad_vars += list(model_fine.parameters())
     #endregion
     
     # Create optimizer
-    #optimizer = torch.optim.Adam(params = grad_vars, lr=args.lrate, betas=(0.9, 0.999), eps=1e-15)
+    optimizer = torch.optim.Adam(params = grad_vars, lr=args.lrate, betas=(0.9, 0.999), eps=1e-15)
     #print(optimizer.param_groups.)
-    optimizer = torch.optim.Adam([{'params': grad_vars},
-                                  {'params': embed_fn.parameters(), 'eps': 1e-15, 'lr': 1e-2}], lr=args.lrate, betas=(0.9,0.999), eps=1e-8)
+    #optimizer = torch.optim.Adam([{'params': grad_vars},
+    #                              {'params': embed_fn.parameters(), 'eps': 1e-15, 'lr': 1e-2}], lr=args.lrate, betas=(0.9,0.999), eps=1e-8)
     loss = nn.MSELoss()
     
     # shortcut for run_network function that takes inputs, viewdirs, times and the network
@@ -186,6 +187,8 @@ def create_tcnn_nerf(args):
     render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
     render_kwargs_test['perturb'] = False
     render_kwargs_test['raw_noise_std'] = 0.
+    render_kwargs_test['N_importance'] = 128
+    render_kwargs_test['N_samples'] = 64
 
     return render_kwargs_train, render_kwargs_test, start, optimizer, model, loss
 
@@ -202,7 +205,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
     # embed position
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
-    #embedded = torch.cat([inputs_flat, embedded], dim=-1)
+    embedded = torch.cat([inputs_flat, embedded], dim=-1)
 
     # embed time
     if embd_time_discr:
@@ -219,7 +222,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
-        #embedded_dirs = torch.cat([input_dirs_flat, embedded_dirs], dim=-1)
+        embedded_dirs = torch.cat([input_dirs_flat, embedded_dirs], dim=-1)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
     outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_time)
@@ -272,8 +275,6 @@ def batchify(fn, chunk):
             out,dx = fn(pts[i:i+chunk], frame_time[i:i+chunk])
             out_list += [out]
             dx_list += [dx]
-        for i in enumerate(dx_list):
-            print(i[1].shape)
         return torch.cat(out_list, 0), torch.cat(dx_list, 0)
     return ret
 
@@ -440,7 +441,6 @@ def render_rays(ray_batch,
     if z_vals is None:
         t_vals = torch.linspace(0., 1., steps=N_samples)
         if not lindisp:
-            # here
             z_vals = near * (1.-t_vals) + far * (t_vals)
         else:
             z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
@@ -572,10 +572,13 @@ def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1,3]).float()
     rays_d = torch.reshape(rays_d, [-1,3]).float()
+    
+    frame_time = torch.reshape(frame_time, (frame_time.size(dim=0), 1))
 
     near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
-    frame_time = frame_time * torch.ones_like(rays_d[...,:1])
+    #frame_time = frame_time * torch.ones_like(rays_d[...,:1])
     rays = torch.cat([rays_o, rays_d, near, far, frame_time], -1)
+    print(rays.shape)
     if use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
 
@@ -651,7 +654,7 @@ def config_parser():
                         help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true', 
                         help='use full 5D input instead of 3D')
-    parser.add_argument("--i_embed", type=int, default=1, 
+    parser.add_argument("--i_embed", type=int, default=0, 
                         help='set 0 for default positional encoding, -1 for none, 1 for tcnn')
     parser.add_argument("--multires", type=int, default=10, 
                         help='log2 of max freq for positional encoding (3D location)')
@@ -686,6 +689,8 @@ def config_parser():
                         help='evaluate tv loss')
     parser.add_argument("--tv_loss_weight", type=float,
                         default=1.e-4, help='weight of tv loss')
+    parser.add_argument("--trainset_size", type=int, default=3,
+                        help='number of training images to use')
 
     # dataset options
     parser.add_argument("--dataset_type", type=str, default='llff', 
@@ -740,8 +745,8 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         # images        = training, validation, test images
         # poses         = corresponding transformation matrices <-- origin and viewdir of camera
         # times         = timestamps (time of capture)
-        # render_poses  = transformation matrices for novel view synthesis
-        # render_times  = timestamps for novel view synthesis
+        # render_poses  = test poses
+        # render_times  = test times
         # hwf           = height, width, focal length
         # i_split       = number of training, validation and test examples
         images, poses, times, render_poses, render_times, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
@@ -819,10 +824,6 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
 
-    # Move testing data to GPU
-    render_poses = torch.Tensor(render_poses).to(device)
-    render_times = torch.Tensor(render_times).to(device)
-
     # Short circuit if only rendering out from trained model
     if args.render_only:
         print('RENDER ONLY')
@@ -846,9 +847,12 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             return
 
     # Prepare raybatch tensor if batching random rays
-    N_rand = args.N_rand
     use_batching = not args.no_batching
     if use_batching:
+        times_flat = torch.empty(160_000,3,1).fill_(times[0]).cpu()
+        for i in i_train[1:]:
+            tr_time = torch.empty(160_000,3,1).fill_(times[i]).cpu()
+            times_flat = np.concatenate([times_flat, tr_time], 0)
         # For random ray batching
         print('get rays')
         rays = np.stack([get_rays_np(H, W, focal, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
@@ -857,12 +861,16 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
         rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
+        rays_rgb = np.concatenate([rays_rgb, times_flat], -1)
         rays_rgb = rays_rgb.astype(np.float32)
         print('shuffle rays')
         np.random.shuffle(rays_rgb)
-
         print('done')
         i_batch = 0
+        
+    # Move testing data to GPU
+    render_poses = torch.Tensor(render_poses).to(device)
+    render_times = torch.Tensor(render_times).to(device)
 
     # Move training data to GPU
     images = torch.Tensor(images).to(device)
@@ -870,13 +878,6 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     times = torch.Tensor(times).to(device)
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
-
-    ### Input no. of iterations manually or get from args
-    #iterations = int(input('\nInput no. of iterations: '))
-    #N_iters = iterations + 1
-    N_iters = args.N_iter + 1
-
-    print('\nBegin')
 
     # Summary writers
     writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
@@ -887,6 +888,14 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     # if N_iters <= args.training_image_frequency * len(i_train) or N_iters <= args.precrop_iters_time:
     #     successive_training = False
     
+    N_rand = args.N_rand
+    
+    ### Input no. of iterations manually or get from args
+    #iterations = int(input('\nInput no. of iterations: '))
+    #N_iters = iterations + 1
+    N_iters = args.N_iter + 1
+    
+    print('\nBegin')    
     ### Start of training loop
     if DEBUG > 0:
         print('\nStarting training loop.')
@@ -897,22 +906,18 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             print('\nIteration ', i)
         time0 = time.time()
 
-        #region Sample random ray batch (NotImplemented)
         if use_batching:
-            raise NotImplementedError("Time not implemented")
-
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
-            batch_rays, target_s = batch[:2], batch[2]
-
+            batch_rays, target_s, frame_time = batch[:2,...,:3], batch[2,...,:3], batch[1,...,3]
+            
             i_batch += N_rand
             if i_batch >= rays_rgb.shape[0]:
                 print("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
-        #endregion
         else:
             # Select Training Example Random from one image
             if i >= args.precrop_iters_time:
@@ -922,6 +927,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             elif i >= args.precrop_iters_begin:
                 skip_factor = (i / float(args.precrop_iters_time)) * len(i_train)
                 max_sample = max(int(skip_factor), 3)
+                #max_sample = args.trainset_size
                 img_i = np.random.choice(i_train[:max_sample])
             else:
                 img_i = 0
@@ -1044,11 +1050,19 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
-        decay_rate = 0.1
-        decay_steps = args.lrate_decay * 1000
-        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lrate
+        # learn rate will decay by decay factor 
+        # decay_factor = 0.1
+        # decay_steps = args.lrate_decay #  * 1000
+        # new_lrate = args.lrate * (decay_factor ** (global_step / decay_steps))
+        # for param_group in optimizer.param_groups:
+        #     param_group['lr'] = new_lrate
+            
+        ### update sampling ###
+        if i%args.precrop_iters==0:
+            N_rand = int(N_rand * 0.5)
+            render_kwargs_train['N_samples'] *= 2
+            render_kwargs_train['N_importance'] *= 2
+            args.precrop_iters *= 2
         ################################
 
         dt = time.time()-time0
@@ -1073,7 +1087,8 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
 
         ### PRINT LOSS
         if (i + 1) % args.i_print == 0:
-            tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {output.item()} PSNR: {psnr.item()} on IMG: {img_i}"
+            #tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {output.item()} PSNR: {psnr.item()} on IMG: {img_i}"
+            tqdm_txt = f"[TRAIN] Iter: {i} Loss_fine: {output.item()} PSNR: {psnr.item()}"
             if args.add_tv_loss:
                 tqdm_txt += f" TV: {tv_loss.item()}"
             tqdm.write(tqdm_txt)
@@ -1086,7 +1101,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             if args.add_tv_loss:
                 writer.add_scalar('tv', tv_loss.item(), i)
                 
-            #print(optimizer.param_groups[3])
+            #print(optimizer.param_groups[0])
 
         del output, psnr, target_s
         if 'rgb0' in extras:
@@ -1145,10 +1160,10 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         if i%args.i_testset==0:
             #torch.cuda.empty_cache()
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
-            print('Testing poses shape...', poses[i_test].shape)
+            print('Testing poses shape...', poses[i_train[:args.trainset_size]].shape)
             with torch.no_grad():
-                render_path(torch.Tensor(poses[i_test]).to(device), torch.Tensor(times[i_test]).to(device),
-                            hwf, 256*64, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                render_path(torch.Tensor(poses[i_train[:args.trainset_size]]).to(device), torch.Tensor(times[i_train[:args.trainset_size]]).to(device),
+                            hwf, 256*64, render_kwargs_test, gt_imgs=images[i_train[:args.trainset_size]], savedir=testsavedir)
             print('Saved test set')
             
         if DEBUG > 1:
