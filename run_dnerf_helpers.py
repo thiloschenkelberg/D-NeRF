@@ -134,18 +134,22 @@ class FastTemporalNerf(nn.Module):
     # Return optimizer for all networks and encoding (if trainable)
     def get_optimizer(self):
         assert self._is_initialized is True, 'Model has not been initialized.'
-        return torch.optim.Adam([{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
+        return torch.optim.Adam([{'params': self.dx_net.parameters(), 'lr': 1e-2},
                                  {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.pts_encode.parameters()}
-                                ], lr=self.lrate, eps=1e-15, betas=(0.9, 0.999))
+                                ], lr=self.lrate, eps=1e-15, betas=(0.9, 0.99))
     
     # Forward propagation
     def forward(self, x, t):
         # Split concatenated inputs x back to pts and views
         input_pts, input_views = torch.split(x, [self.input_ch_pts,self.input_ch_view], dim=-1)
-        assert len(torch.unique(t)) == 1, "Only accepts all points from same time"
         
+        # Get frame_time if training on single image
+        # Should only skip dx_net if frame_times (t) of all pts are 0. which is 'never' the
+        # case for batched training
+        cur_time = t[0, 0] if len(torch.unique(t))==1 else 1
+            
         if self.debug > 2:
             # Save tensors to file in ./test/
             i_pts = input_pts.cpu()
@@ -160,7 +164,7 @@ class FastTemporalNerf(nn.Module):
         
         input_pts_encoded = self.pts_encode(input_pts)
         
-        cur_time = t[0, 0]
+        
         if cur_time == 0. and self.zero_canonical:
             # No positional delta at t = 0
             # if canonical space is also at t = 0
@@ -173,7 +177,6 @@ class FastTemporalNerf(nn.Module):
             # Use dx_net
             dx_out = self.dx_net(dx_in)
             density_in = input_pts_encoded + dx_out
-            print('time')
         # Add positional delta dx (vector) to pts
         #density_in = input_pts_encoded + dx_out
         # Use density_net

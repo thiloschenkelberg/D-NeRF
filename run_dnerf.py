@@ -236,7 +236,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
     return outputs, position_delta
 
 def run_tcnn_network(inputs, viewdirs, frame_time, fn, netchunk=256*64):
-    assert len(torch.unique(frame_time)) == 1, "Only accepts all points from same time"
+    #assert len(torch.unique(frame_time)) == 1, "Only accepts all points from same time"
     
     # Flatten inputs from (N_rays,Samples,Coords) -> (Indice,Coords)
     input_pts_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
@@ -551,6 +551,7 @@ def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
     if c2w is not None:
         # special case to render full image
         rays_o, rays_d = get_rays(H, W, focal, c2w)
+        frame_time = torch.empty(H*W).fill_(frame_time)
     else:
         # use provided ray batch
         rays_o, rays_d = rays
@@ -578,7 +579,6 @@ def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
 
     near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
     rays = torch.cat([rays_o, rays_d, near, far, frame_time], -1)
-    print(rays.shape)
     if use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
 
@@ -691,6 +691,8 @@ def config_parser():
                         default=1.e-4, help='weight of tv loss')
     parser.add_argument("--trainset_size", type=int, default=3,
                         help='number of training images to use')
+    parser.add_argument("--batching_decay_nrand", action='store_true',
+                        help='decay nrand and increase sampling')
 
     # dataset options
     parser.add_argument("--dataset_type", type=str, default='llff', 
@@ -740,7 +742,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     parser = config_parser()
     args = parser.parse_args()
 
-    ### Load data
+    ### Load data ###
     if args.dataset_type == 'blender':
         # images        = training, validation, test images
         # poses         = corresponding transformation matrices <-- origin and viewdir of camera
@@ -846,7 +848,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
 
             return
 
-    # Prepare raybatch tensor if batching random rays
+    ### Prepare raybatch tensor if batching random rays ###
     use_batching = not args.no_batching
     if use_batching:
         times_flat = torch.empty(160_000,3,1).fill_(times[0]).cpu()
@@ -882,21 +884,20 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     # Summary writers
     writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
 
-    # Successive training
+    ### Successive training ### 
     # successive_training = args.successive_training_set
     # # Make sure number of iterations is enough to work through training set successively instead of random
     # if N_iters <= args.training_image_frequency * len(i_train) or N_iters <= args.precrop_iters_time:
     #     successive_training = False
     
-    N_rand = args.N_rand
-    
-    ### Input no. of iterations manually or get from args
+    ### Input no. of iterations manually or get from args ###
     #iterations = int(input('\nInput no. of iterations: '))
     #N_iters = iterations + 1
     N_iters = args.N_iter + 1
+    N_rand = args.N_rand
     
     print('\nBegin')    
-    ### Start of training loop
+    ### Start of training loop ###
     if DEBUG > 0:
         print('\nStarting training loop.')
     torch.cuda.empty_cache()
@@ -927,8 +928,13 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             elif i >= args.precrop_iters_begin:
                 skip_factor = (i / float(args.precrop_iters_time)) * len(i_train)
                 max_sample = max(int(skip_factor), 3)
-                #max_sample = args.trainset_size
+                #max_sample = 3
                 img_i = np.random.choice(i_train[:max_sample])
+                # if i == 500:
+                #     use_batching = True
+                #     N_rand = 8000
+                #     render_kwargs_train['N_samples'] = 16
+                #     render_kwargs_train['N_importance'] = 16
             else:
                 img_i = 0
             tr_ex = img_i
@@ -1027,7 +1033,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         
         optimizer.zero_grad()
         
-        ### Torch vs Self-implemented L2-loss calculation
+        ## Torch vs Self-implemented L2-loss calculation
         # when using Torch version uncomment in create_nerf() / create_tcnn_nerf()
         #output = loss(rgb, target_s)
         output = img2mse(rgb, target_s)
@@ -1052,14 +1058,14 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
         # learn rate will decay by decay factor 
-        # decay_factor = 0.1
-        # decay_steps = args.lrate_decay #  * 1000
-        # new_lrate = args.lrate * (decay_factor ** (global_step / decay_steps))
-        # for param_group in optimizer.param_groups:
-        #     param_group['lr'] = new_lrate
+        decay_factor = 0.1
+        decay_steps = args.lrate_decay #  * 1000
+        new_lrate = args.lrate * (decay_factor ** (global_step / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
             
         ### update sampling ###
-        if i%args.precrop_iters==0:
+        if i%args.precrop_iters==0 and args.batching_decay_nrand:
             N_rand = int(N_rand * 0.5)
             render_kwargs_train['N_samples'] *= 2
             render_kwargs_train['N_importance'] *= 2
