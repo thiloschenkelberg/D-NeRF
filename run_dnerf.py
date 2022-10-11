@@ -689,7 +689,7 @@ def config_parser():
                         help='evaluate tv loss')
     parser.add_argument("--tv_loss_weight", type=float,
                         default=1.e-4, help='weight of tv loss')
-    parser.add_argument("--trainset_size", type=int, default=3,
+    parser.add_argument("--testset_size", type=int, default=3,
                         help='number of training images to use')
     parser.add_argument("--batching_decay_nrand", action='store_true',
                         help='decay nrand and increase sampling')
@@ -851,22 +851,23 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     ### Prepare raybatch tensor if batching random rays ###
     use_batching = not args.no_batching
     if use_batching:
-        times_flat = torch.empty(160_000,3,1).fill_(times[0]).cpu()
+        times_flat = torch.empty(H*W,3,1).fill_(times[0]).cpu()
         for i in i_train[1:]:
-            tr_time = torch.empty(160_000,3,1).fill_(times[i]).cpu()
+            tr_time = torch.empty(H*W,3,1).fill_(times[i]).cpu()
             times_flat = np.concatenate([times_flat, tr_time], 0)
         # For random ray batching
         print('get rays')
         rays = np.stack([get_rays_np(H, W, focal, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
         print('done, concats')
-        rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
-        rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
-        rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
-        rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
-        rays_rgb = np.concatenate([rays_rgb, times_flat], -1)
-        rays_rgb = rays_rgb.astype(np.float32)
+        rays_total = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
+        rays_total = np.transpose(rays_total, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
+        rays_total = np.stack([rays_total[i] for i in i_train], 0) # train images only
+        rays_total = np.reshape(rays_total, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
+        rays_total = np.concatenate([rays_total, times_flat], -1)
+        rays_total = rays_total.astype(np.float32)
         print('shuffle rays')
-        np.random.shuffle(rays_rgb)
+        if not args.succesive_training_set:
+            np.random.shuffle(rays_total)
         print('done')
         i_batch = 0
         
@@ -879,7 +880,14 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     poses = torch.Tensor(poses).to(device)
     times = torch.Tensor(times).to(device)
     if use_batching:
-        rays_rgb = torch.Tensor(rays_rgb).to(device)
+        if args.successive_training_set:
+            rays_rgb = torch.Tensor(rays_total[:H*W*3]).to(device)
+            rays_total = torch.Tensor(rays_total[H*W*3:]).to(device)
+            rand_idx = torch.randperm(rays_rgb.shape[0])
+            rays_rgb = rays_rgb[rand_idx]
+        else:
+            rays_rgb = rays_total
+            rays_rgb = torch.Tensor(rays_rgb).to(device)
 
     # Summary writers
     writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
@@ -895,13 +903,15 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     #N_iters = iterations + 1
     N_iters = args.N_iter + 1
     N_rand = args.N_rand
+    # Add first images to successive training set after N epochs
+    N_init_epochs = 5
+    N_add_iter = H*W*3 / N_rand * N_init_epochs
+    # Add atleast N images to successive training set
+    N_add = 5
     
-    print('\nBegin')    
     ### Start of training loop ###
-    if DEBUG > 0:
-        print('\nStarting training loop.')
-    torch.cuda.empty_cache()
-    start = start + 1 # set start to 1
+    print('\nBegin')  
+    start = start + 1
     for i in trange(start, N_iters):
         if DEBUG > 1:
             print('\nIteration ', i)
@@ -919,6 +929,21 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
+            
+            if args.successive_training_set and i==N_add_iter:
+                N_rays_added = H*W * N_add
+                rays_rgb = torch.cat([rays_rgb, rays_total[:N_rays_added]])
+                rays_total = rays_total[N_rays_added:]
+
+                # Add more images on iteration i + N if possible
+                N_add += 2
+                if rays_total.shape[0] >= H*W * N_add:
+                    N_add_iter += 100
+
+                print(f"{N_add} training images added. Shuffling")
+                rand_idx = torch.randperm(rays_rgb.shape[0])
+                rays_rgb = rays_rgb[rand_idx]
+                
         else:
             # Select Training Example Random from one image
             if i >= args.precrop_iters_time:
@@ -1167,10 +1192,10 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         if i%args.i_testset==0:
             #torch.cuda.empty_cache()
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
-            print('Testing poses shape...', poses[i_train[:args.trainset_size]].shape)
+            print('Testing poses shape...', poses[i_train[:args.testset_size]].shape)
             with torch.no_grad():
-                render_path(torch.Tensor(poses[i_train[:args.trainset_size]]).to(device), torch.Tensor(times[i_train[:args.trainset_size]]).to(device),
-                            hwf, 256*64, render_kwargs_test, gt_imgs=images[i_train[:args.trainset_size]], savedir=testsavedir)
+                render_path(torch.Tensor(poses[i_train[:args.testset_size]]).to(device), torch.Tensor(times[i_train[:args.testset_size]]).to(device),
+                            hwf, 256*64, render_kwargs_test, gt_imgs=images[i_train[:args.testset_size]], savedir=testsavedir)
             print('Saved test set')
             
         if DEBUG > 1:

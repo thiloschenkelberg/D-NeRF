@@ -9,13 +9,14 @@ not_zero_canonical = False
 
 use_viewdirs = True
 white_bkgd = True
+
 lrate = 1e-3
 lrate_decay = 2000
 
 N_iter = 4000
 N_samples = 8
-N_importance = 8
-N_rand = 32000
+N_importance = 16
+N_rand = 16000
 testskip = 1
 
 i_print = 10
@@ -28,9 +29,10 @@ precrop_iters = 25000
 precrop_iters_time = 10000
 precrop_frac = 0.5
 precrop_iters_begin = 0
-successive_training_set = False
+
+successive_training_set = True
 training_image_frequency = 10
-trainset_size = 5
+testset_size = 5
 batching_decay_nrand = False
 
 half_res = True

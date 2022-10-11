@@ -116,9 +116,9 @@ class FastTemporalNerf(nn.Module):
     def create_grid_model(self):
         pts_encode = tcnn.Encoding(3, self.config["grid_encoding"])
         t_encode = tcnn.Encoding(1, self.config["frequency_encoding"])
-        dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims + 1, pts_encode.n_output_dims, self.config["cutlass_one"]) 
-        density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_one"]) 
-        rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_two"])
+        dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims + 1, 3, self.config["cutlass_one"]) 
+        density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_two"]) 
+        rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_three"])
 
         self._is_initialized = True
         return dx_net, density_net, rgb_net, pts_encode, t_encode
@@ -134,7 +134,7 @@ class FastTemporalNerf(nn.Module):
     # Return optimizer for all networks and encoding (if trainable)
     def get_optimizer(self):
         assert self._is_initialized is True, 'Model has not been initialized.'
-        return torch.optim.Adam([{'params': self.dx_net.parameters(), 'lr': 1e-2},
+        return torch.optim.Adam([{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.pts_encode.parameters()}
@@ -164,10 +164,10 @@ class FastTemporalNerf(nn.Module):
         
         input_pts_encoded = self.pts_encode(input_pts)
         
-        
         if cur_time == 0. and self.zero_canonical:
             # No positional delta at t = 0
             # if canonical space is also at t = 0
+            dx_out = torch.zeros_like(input_pts)
             density_in = input_pts_encoded
         else:
             # Encode time input and concatenate to original time input
@@ -214,8 +214,7 @@ class FastTemporalNerf(nn.Module):
                 np.savetxt('./test/rgb_out.txt', o_rgb.numpy())
                 o_rgba = rgba.cpu()
                 np.savetxt('./test/rgba_out.txt', o_rgba.numpy())
-        
-        dx_out = torch.zeros_like(input_pts)
+    
         return rgba,dx_out
 
     __call__ = forward
