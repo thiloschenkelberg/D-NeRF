@@ -1,38 +1,39 @@
-expname = mutant
+expname = lego
 basedir = ./logs
-datadir = ./data/mutant
+datadir = ./data/lego
 dataset_type = blender
 
 nerf_type = fast_temporal
 no_batching = False
 not_zero_canonical = False
+perturb = 1.0
 
 use_viewdirs = True
 white_bkgd = True
 
-lrate = 1e-3
-lrate_decay = 2000
+lrate = 1e-2
+lrate_decay = 4000
 
-N_iter = 4000
-N_samples = 8
-N_importance = 16
-N_rand = 16000
+N_iter = 1000
+N_samples = 128
+N_importance = 0
+N_rand = 500
 testskip = 1
 
 i_print = 10
 i_img = 1000000
 i_weights = 1000000
-i_testset = 1000
+i_testset = 500
 i_video = 1000000
 
-precrop_iters = 25000
-precrop_iters_time = 10000
+precrop_iters = 150
+precrop_iters_time = 250
 precrop_frac = 0.5
 precrop_iters_begin = 0
 
-successive_training_set = True
+successive_training_set = False
 training_image_frequency = 10
-testset_size = 5
+testset_size = 3
 batching_decay_nrand = False
 
 half_res = True

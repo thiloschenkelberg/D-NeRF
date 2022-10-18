@@ -96,7 +96,7 @@ def load_blender_data(basedir, half_res=False, testskip=1):
             cur_time = frame['time'] if 'time' in frame else 0.
             times.append(cur_time)
 
-        assert times[0] == 0, "Time must start at 0"
+        #assert times[0] == 0, "Time must start at 0"
 
         imgs = (np.array(imgs) / 255.).astype(np.float32)  # keep all 4 channels (RGBA)
         poses = np.array(poses).astype(np.float32)

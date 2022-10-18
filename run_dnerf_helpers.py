@@ -50,7 +50,7 @@ class Embedder:
                 #print('\noutdim: ', out_dim)
                     
         self.embed_fns = embed_fns
-        self.out_dim = out_dim + d
+        self.out_dim = out_dim
         
     def embed(self, inputs):
         return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
@@ -81,7 +81,7 @@ def get_tcnn_embedding():
         config=json.load(f)
         
     embed_fn = tcnn.Encoding(3, config["frequency_encoding"])
-    input_ch = embed_fn.n_output_dims
+    input_ch = embed_fn.n_output_dims + 3
     embeddirs_fn = tcnn.Encoding(3, config["sh_encoding"])
     input_ch_views = embeddirs_fn.n_output_dims
     embedtime_fn = tcnn.Encoding(1, config["frequency_encoding"])
@@ -109,19 +109,33 @@ class FastTemporalNerf(nn.Module):
         self.lrate=lrate
         self.zero_canonical=zero_canonical
         self.debug=debug
+        self.count=1
+        #self.skips=[4]
         self._is_initialized=False
         self.dx_net, self.density_net, self.rgb_net, self.pts_encode, self.t_encode = self.create_grid_model()
-    
+                
     # Create model with dx_-, density_-, and color_net aswell as (trainable) encoding
     def create_grid_model(self):
         pts_encode = tcnn.Encoding(3, self.config["grid_encoding"])
-        t_encode = tcnn.Encoding(1, self.config["frequency_encoding"])
-        dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims + 1, 3, self.config["cutlass_one"]) 
-        density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_two"]) 
-        rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_three"])
+        t_encode = tcnn.Encoding(2, self.config["grid_encoding_t"])
+        dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims, 3, self.config["cutlass_three"]) 
+        density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_one"]) 
+        rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_two"])
 
         self._is_initialized = True
         return dx_net, density_net, rgb_net, pts_encode, t_encode
+    
+    # def create_time_net(self):
+    #     layers = [nn.Linear(60 + 20, 256)]
+    #     for i in range(7):
+    #         layer = nn.Linear
+
+    #         in_channels = 256
+    #         if i in self.skips:
+    #             in_channels += 60
+
+    #         layers += [layer(in_channels, 256)]
+    #     return nn.ModuleList(layers), nn.Linear(256, 3)
 
     # Return params for all networks and encoding (if trainable)
     def get_model_params(self):
@@ -134,11 +148,21 @@ class FastTemporalNerf(nn.Module):
     # Return optimizer for all networks and encoding (if trainable)
     def get_optimizer(self):
         assert self._is_initialized is True, 'Model has not been initialized.'
-        return torch.optim.Adam([{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
+        return torch.optim.AdamW([{'params': self.dx_net.parameters(), 'eps': 1e-8, 'lr': 5e-4},
                                  {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
-                                 {'params': self.pts_encode.parameters()}
+                                 {'params': self.pts_encode.parameters()},
                                 ], lr=self.lrate, eps=1e-15, betas=(0.9, 0.99))
+        
+    # def query_time(self, pts, t, net, net_final):
+    #     h = torch.cat([pts, t], dim=-1)
+    #     for i, l in enumerate(net):
+    #         h = net[i](h)
+    #         h = F.relu(h)
+    #         if i in self.skips:
+    #             h = torch.cat([pts, h], -1)
+
+    #     return net_final(h)
     
     # Forward propagation
     def forward(self, x, t):
@@ -148,7 +172,7 @@ class FastTemporalNerf(nn.Module):
         # Get frame_time if training on single image
         # Should only skip dx_net if frame_times (t) of all pts are 0. which is 'never' the
         # case for batched training
-        cur_time = t[0, 0] if len(torch.unique(t))==1 else 1
+        cur_time = t[0,0] if len(torch.unique(t))==1 else 1
             
         if self.debug > 2:
             # Save tensors to file in ./test/
@@ -159,9 +183,10 @@ class FastTemporalNerf(nn.Module):
             np.savetxt('./test/input_views.txt', i_views.numpy())
             np.savetxt('./test/time.txt', i_time.numpy())
         
+        ###############3### TODO: trainable 2D time encoding
+        
         ### TODO: check if using dx_net 
         # in all cases is possible/effective
-        
         input_pts_encoded = self.pts_encode(input_pts)
         
         if cur_time == 0. and self.zero_canonical:
@@ -170,23 +195,29 @@ class FastTemporalNerf(nn.Module):
             dx_out = torch.zeros_like(input_pts)
             density_in = input_pts_encoded
         else:
+            print('test')
             # Encode time input and concatenate to original time input
-            time_encoded = torch.cat([t, self.t_encode(t)], dim=-1)
+            #time_encoded = torch.cat([t, self.t_encode(t)], dim=-1)
+            time_encoded = self.t_encode(t)
             # Concatenate encoded input pts with encoded time
             dx_in = torch.cat([input_pts_encoded, time_encoded], dim=-1)
             # Use dx_net
             dx_out = self.dx_net(dx_in)
-            density_in = input_pts_encoded + dx_out
-        # Add positional delta dx (vector) to pts
-        #density_in = input_pts_encoded + dx_out
+            density_in = self.pts_encode(input_pts + dx_out)
         # Use density_net
         density_out = self.density_net(density_in)
+        #input()
         # Concatenate density_net output (16) with views (3) 
         rgb_in = torch.cat([density_out, input_views], dim=-1)
-        # Use color_net (19in, 3out) internally encoded to density(16) + view(16) = 32in
+        # Use color_net (16+3in, 3out) internally encoded to density(16) + view(16) = 32in
         rgb_out = self.rgb_net(rgb_in)
         # Concatenate color_out with first output value of density_net
         rgba = torch.cat([rgb_out, density_out[...,:1]], dim=-1)
+        # if self.count%800==0 or self.count==1:
+        #     print(dx_out[:8])
+        #     print(dx_out[:6])
+
+        self.count+=1
         
         if self.debug > 1:
             # Log tensor shapes
@@ -214,7 +245,8 @@ class FastTemporalNerf(nn.Module):
                 np.savetxt('./test/rgb_out.txt', o_rgb.numpy())
                 o_rgba = rgba.cpu()
                 np.savetxt('./test/rgba_out.txt', o_rgba.numpy())
-    
+        
+        #dx_out = torch.zeros_like(input_pts)
         return rgba,dx_out
 
     __call__ = forward
@@ -229,13 +261,13 @@ class DirectTemporalNeRF(nn.Module):
         self.input_ch = input_ch
         self.input_ch_views = input_ch_views
         self.input_ch_time = input_ch_time
-        self.skips = [0]
+        self.skips = skips
         self.use_viewdirs = use_viewdirs
         self.memory = memory
-        self.embed_fn = None
+        self.embed_fn = embed_fn
         self.zero_canonical = zero_canonical
         self._occ = NeRFOriginal(D=D, W=W, input_ch=input_ch, input_ch_views=input_ch_views,
-                                 input_ch_time=input_ch_time, output_ch=output_ch, skips=[0],
+                                 input_ch_time=input_ch_time, output_ch=output_ch, skips=skips,
                                  use_viewdirs=use_viewdirs, memory=memory, embed_fn=embed_fn, output_color_ch=3)
         self._time, self._time_out = self.create_time_net()
 
@@ -252,7 +284,7 @@ class DirectTemporalNeRF(nn.Module):
                 in_channels += self.input_ch
 
             layers += [layer(in_channels, self.W)]
-        return nn.ModuleList(layers), nn.Linear(self.W, 64)
+        return nn.ModuleList(layers), nn.Linear(self.W, 3)
 
     def query_time(self, pts, t, net, net_final):
         h = torch.cat([pts, t], dim=-1)
@@ -265,19 +297,16 @@ class DirectTemporalNeRF(nn.Module):
         return net_final(h)
 
     def forward(self, x, t):
-        #print('first call: ', x.shape)
-        input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+        input_pts, views_embedded = torch.split(x, [3, self.input_ch_views], dim=-1)
         assert len(torch.unique(t[:, :1])) == 1, "Only accepts all points from same time"
         cur_time = t[0, 0]
+        pts_embedded = torch.cat([input_pts,self.embed_fn(input_pts)], dim=-1)
         if cur_time == 0. and self.zero_canonical:
             dx = torch.zeros_like(input_pts[:, :3])
         else:
-            dx = self.query_time(input_pts, t, self._time, self._time_out)
-            input_pts += dx
-            #input_pts_dx = input_pts[:, :3] + dx
-            #input_pts = torch.cat([input_pts_dx, self.embed_fn(input_pts_dx)], dim=-1)
-        #out, _ = self._occ(torch.cat([input_pts, input_views], dim=-1), t)
-        out, _ = self._occ(x, t)
+            dx = self.query_time(pts_embedded, t, self._time, self._time_out)
+            pts_embedded = torch.cat([input_pts, self.embed_fn(input_pts + dx)], -1)
+        out, _ = self._occ(torch.cat([pts_embedded, views_embedded], dim=-1), t)
         return out, dx
     
     def add_embedding(self, embed_fn):
@@ -299,7 +328,7 @@ class NeRF:
         return model
 
 class NeRFOriginal(nn.Module):
-    def __init__(self, D=8, W=128, input_ch=3, input_ch_views=3, input_ch_time=1, output_ch=4, skips=[4],
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, input_ch_time=1, output_ch=4, skips=[4],
                  use_viewdirs=False, memory=[], embed_fn=None, output_color_ch=3, zero_canonical=True):
         super(NeRFOriginal, self).__init__()
         self.D = D
@@ -364,6 +393,7 @@ class NeRFOriginal(nn.Module):
             outputs = torch.cat([rgb, alpha], -1)
         else:
             outputs = self.output_linear(h)
+            
         return outputs, torch.zeros_like(input_pts[:, :3])
 
     def load_weights_from_keras(self, weights):
