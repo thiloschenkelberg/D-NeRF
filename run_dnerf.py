@@ -959,6 +959,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             render_kwargs_train['norm_max'] = norm_max
             render_kwargs_test['norm_min'] = norm_min
             render_kwargs_test['norm_max'] = norm_max
+            first_image = rays_rgb[:160_000]
             # Shuffle rays
             rand_idx = torch.randperm(rays_rgb.shape[0])
             rays_rgb = rays_rgb[rand_idx]
@@ -992,6 +993,33 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         time0 = time.time()
 
         if use_batching:
+
+            if i == 499:
+                
+                batch = first_image[:1000]
+                batch = torch.transpose(batch, 0,1)
+                batch_rays, frame_time = batch[:2,...,:3],batch[1,...,3]
+                rendered, disp, acc, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays, frame_time=frame_time,
+                                                verbose=i < 10, retraw=True,
+                                                **render_kwargs_train)
+
+                i_batch=1000
+                for y in range(159):
+                    batch = first_image[i_batch:i_batch+1000]
+                    batch = torch.transpose(batch, 0,1)
+                    batch_rays, frame_time = batch[:2,...,:3],batch[1,...,3]
+                    i_batch += 1000
+
+                    rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays, frame_time=frame_time,
+                                                verbose=i < 10, retraw=True,
+                                                **render_kwargs_train)
+
+                    rendered = torch.cat([rendered, rgb], dim=0)
+
+                rendered = rendered.reshape(400,400,3)
+                plt.imshow(rendered)
+                    
+
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
