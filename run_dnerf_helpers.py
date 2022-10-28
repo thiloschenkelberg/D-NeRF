@@ -7,6 +7,9 @@ from torchsearchsorted import searchsorted
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.patches import FancyArrowPatch
+from mpl_toolkits.mplot3d.proj3d import proj_transform
+from mpl_toolkits.mplot3d.axes3d import Axes3D
 
 import commentjson as json
 import tinycudann as tcnn
@@ -117,8 +120,9 @@ class FastTemporalNerf(nn.Module):
     # Create model with dx_-, density_-, and color_net aswell as (trainable) encoding
     def create_grid_model(self):
         pts_encode = tcnn.Encoding(3, self.config["grid_encoding"])
+        #pts2_encode = tcnn.Encoding(3, self.config["grid_encoding"])
         t_encode = tcnn.Encoding(2, self.config["grid_encoding_t"])
-        dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims, 3, self.config["cutlass_three"]) 
+        dx_net = tcnn.Network(pts_encode.n_output_dims + t_encode.n_output_dims, 32, self.config["cutlass_three"]) 
         density_net = tcnn.Network(pts_encode.n_output_dims, 16, self.config["cutlass_one"]) 
         rgb_net = tcnn.NetworkWithInputEncoding(density_net.n_output_dims + 3, 3, self.config["sh_encoding_c"], self.config["cutlass_two"])
 
@@ -148,10 +152,10 @@ class FastTemporalNerf(nn.Module):
     # Return optimizer for all networks and encoding (if trainable)
     def get_optimizer(self):
         assert self._is_initialized is True, 'Model has not been initialized.'
-        return torch.optim.AdamW([{'params': self.dx_net.parameters(), 'eps': 1e-8, 'lr': 5e-4},
+        return torch.optim.AdamW([{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
                                  {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
-                                 {'params': self.pts_encode.parameters()},
+                                 {'params': self.pts_encode.parameters()}
                                 ], lr=self.lrate, eps=1e-15, betas=(0.9, 0.99))
         
     # def query_time(self, pts, t, net, net_final):
@@ -189,13 +193,13 @@ class FastTemporalNerf(nn.Module):
         # in all cases is possible/effective
         input_pts_encoded = self.pts_encode(input_pts)
         
+        #cur_time = 0.
         if cur_time == 0. and self.zero_canonical:
             # No positional delta at t = 0
             # if canonical space is also at t = 0
             dx_out = torch.zeros_like(input_pts)
             density_in = input_pts_encoded
         else:
-            print('test')
             # Encode time input and concatenate to original time input
             #time_encoded = torch.cat([t, self.t_encode(t)], dim=-1)
             time_encoded = self.t_encode(t)
@@ -203,7 +207,7 @@ class FastTemporalNerf(nn.Module):
             dx_in = torch.cat([input_pts_encoded, time_encoded], dim=-1)
             # Use dx_net
             dx_out = self.dx_net(dx_in)
-            density_in = self.pts_encode(input_pts + dx_out)
+            density_in = input_pts_encoded + dx_out
         # Use density_net
         density_out = self.density_net(density_in)
         #input()
@@ -246,7 +250,7 @@ class FastTemporalNerf(nn.Module):
                 o_rgba = rgba.cpu()
                 np.savetxt('./test/rgba_out.txt', o_rgba.numpy())
         
-        #dx_out = torch.zeros_like(input_pts)
+        dx_out = torch.zeros_like(input_pts)
         return rgba,dx_out
 
     __call__ = forward
@@ -572,3 +576,38 @@ def plot_grad_flow(named_parameters):
                 Line2D([0], [0], color="k", lw=4)], ['max-gradient', 'mean-gradient', 'zero-gradient'])
     
     plt.show()
+    
+    
+class Arrow3D(FancyArrowPatch):
+
+    def __init__(self, x, y, z, dx, dy, dz, *args, **kwargs):
+        super().__init__((0, 0), (0, 0), *args, **kwargs)
+        self._xyz = (x, y, z)
+        self._dxdydz = (dx, dy, dz)
+
+    def draw(self, renderer):
+        x1, y1, z1 = self._xyz
+        dx, dy, dz = self._dxdydz
+        x2, y2, z2 = (x1 + dx, y1 + dy, z1 + dz)
+
+        xs, ys, zs = proj_transform((x1, x2), (y1, y2), (z1, z2), self.axes.M)
+        self.set_positions((xs[0], ys[0]), (xs[1], ys[1]))
+        super().draw(renderer)
+        
+    def do_3d_projection(self, renderer=None):
+        x1, y1, z1 = self._xyz
+        dx, dy, dz = self._dxdydz
+        x2, y2, z2 = (x1 + dx, y1 + dy, z1 + dz)
+
+        xs, ys, zs = proj_transform((x1, x2), (y1, y2), (z1, z2), self.axes.M)
+        self.set_positions((xs[0], ys[0]), (xs[1], ys[1]))
+
+        return np.min(zs)
+    
+def _arrow3D(ax, x, y, z, dx, dy, dz, *args, **kwargs):
+    '''Add an 3d arrow to an `Axes3D` instance.'''
+
+    arrow = Arrow3D(x, y, z, dx, dy, dz, *args, **kwargs)
+    ax.add_artist(arrow)
+    
+setattr(Axes3D, 'arrow3D', _arrow3D)

@@ -192,7 +192,7 @@ def create_tcnn_nerf(args):
     render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
     render_kwargs_test['perturb'] = False
     render_kwargs_test['raw_noise_std'] = 0.
-    render_kwargs_test['N_importance'] = 128
+    render_kwargs_test['N_importance'] = 64
     render_kwargs_test['N_samples'] = 64
 
     return render_kwargs_train, render_kwargs_test, start, optimizer, model, loss
@@ -288,7 +288,6 @@ def batchify_rays(rays_flat, chunk=256*64, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     Usually 500 rays with 12 fields
     """
-    chunk = 16000
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
         ret = render_rays(rays_flat[i:i+chunk], **kwargs)
@@ -360,10 +359,6 @@ def render_path(render_poses, render_times, hwf, chunk, render_kwargs, gt_imgs=N
         H = H//render_factor
         W = W//render_factor
         focal = focal/render_factor
-        
-    H = H//4
-    W = W//4
-    focal = focal/4
 
     if savedir is not None:
         save_dir_estim = os.path.join(savedir, "estim")
@@ -409,10 +404,7 @@ def render_rays(ray_batch,
                 verbose=False,
                 pytest=False,
                 z_vals=None,
-                use_two_models_for_fine=False,
-                norm_min=0.,
-                norm_max=1.,
-                do=False):
+                use_two_models_for_fine=False):
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
@@ -482,21 +474,37 @@ def render_rays(ray_batch,
     # Get N_samples pts along ray (eg. 64)
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
     # Normalize pts to unit cube
-    pts = (pts - norm_min) / norm_max
+    #pts = (pts - norm_min) / norm_max
     
     # region plot pts
     
-    # if do:
-    #     fig = plt.figure()
-    #     ax = fig.add_subplot(projection='3d')
-    #     xs0 = rays_o[...,0].cpu()
-    #     ys0 = rays_o[...,1].cpu()
-    #     zs0 = rays_o[...,2].cpu()
-    #     xs = np.concatenate([xs0, (xs0 + rays_d[...,0].cpu())], 0)
-    #     ys = np.concatenate([ys0, (ys0 + rays_d[...,1].cpu())], 0)
-    #     zs = np.concatenate([zs0, (zs0 + rays_d[...,2].cpu())], 0)
-    #     ax.scatter(xs, ys, zs, marker='x')
-    #     plt.show()
+    #print(rays_d)
+    
+    # fig = plt.figure()
+    # ax = fig.add_subplot(projection='3d')
+    # # xs0 = rays_o[...,0].cpu()
+    # # ys0 = rays_o[...,1].cpu()
+    # # zs0 = rays_o[...,2].cpu()
+    # # xs = np.concatenate([xs0, (xs0 + rays_d[...,0].cpu())], 0)
+    # # ys = np.concatenate([ys0, (ys0 + rays_d[...,1].cpu())], 0)
+    # # zs = np.concatenate([zs0, (zs0 + rays_d[...,2].cpu())], 0)
+    # xs = pts[...,0].cpu()
+    # print(pts[...,0].shape)
+    # ys = pts[...,1].cpu()
+    # zs = pts[...,2].cpu()
+    # ax.scatter(xs, ys, zs, marker='x', color='black')
+    # for i in range(rays_o.shape[0]):
+    #     ax.arrow3D(xs[i,0],
+    #                ys[i,0],
+    #                zs[i,0],
+    #                rays_d[i,0].cpu()*4,
+    #                rays_d[i,1].cpu()*4,
+    #                rays_d[i,2].cpu()*4,
+    #                mutation_scale=10, arrowstyle="-|>", linestyle='-', color='black')
+    # ax.set_xlim(0,1)
+    # ax.set_ylim(0,1)
+    # ax.set_zlim(0,1)
+    # plt.show()
     
     # endregion
     
@@ -514,7 +522,8 @@ def render_rays(ray_batch,
         z_samples = z_samples.detach()
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
-    
+        #pts = (pts - norm_min) / norm_max
+        
     #run_fn = network_fn if network_fine is None else network_fine
     
     raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
@@ -566,6 +575,7 @@ def render_rays(ray_batch,
 def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
                   near=0., far=1., frame_time=None,
                   use_viewdirs=False, c2w_staticcam=None,
+                  norm_min=[0.,0.,0.], norm_max=[1.,1.,1.], normalize=False,
                   **kwargs):
     """Render rays
     Args:
@@ -591,8 +601,36 @@ def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
     """
     if c2w is not None:
         # special case to render full image
+        frame_time = torch.empty(H*W).fill_(frame_time)
         rays_o, rays_d = get_rays(H, W, focal, c2w)
         
+        # normalizing rays to unit cube
+        if normalize:
+            rays_o_temp = torch.zeros_like(rays_o)
+            rays_d_temp = torch.zeros_like(rays_d)
+            
+            for i in range(3):
+                # norm_min = torch.min(torch.min(rays_o[...,i] + rays_d[...,i] * near), torch.min(rays_o[...,i] + rays_d[...,i] * far))
+                # rays_o_temp[...,i] = rays_o[...,i] - norm_min + 1e-7
+                # norm_max = torch.max(torch.max(rays_o_temp[...,i] + rays_d[...,i] * near), torch.max(rays_o_temp[...,i] + rays_d[...,i] * far))
+                # rays_o_temp[...,i] /= norm_max
+                # rays_d_temp[...,i] = rays_d[...,i] / norm_max
+                norm_min_flat = norm_min[i] * torch.ones_like(rays_o[...,i])
+                rays_o_temp[...,i] = rays_o[...,i] - norm_min_flat
+                rays_o_temp[...,i] /= norm_max[i]
+                rays_d_temp[...,i] = rays_d[...,i] / norm_max[i]
+                
+            rays_o = rays_o_temp
+            rays_d = rays_d_temp
+            
+            # print(torch.min(torch.min(rays_o[...,0] + rays_d[...,0] * near), torch.min(rays_o[...,0] + rays_d[...,0] * far)))
+            # print(torch.min(torch.min(rays_o[...,1] + rays_d[...,1] * near), torch.min(rays_o[...,1] + rays_d[...,1] * far)))
+            # print(torch.min(torch.min(rays_o[...,2] + rays_d[...,2] * near), torch.min(rays_o[...,2] + rays_d[...,2] * far)))
+            
+            # print(torch.max(torch.max(rays_o[...,0] + rays_d[...,0] * near), torch.max(rays_o[...,0] + rays_d[...,0] * far)))
+            # print(torch.max(torch.max(rays_o[...,1] + rays_d[...,1] * near), torch.max(rays_o[...,1] + rays_d[...,1] * far)))
+            # print(torch.max(torch.max(rays_o[...,2] + rays_d[...,2] * near), torch.max(rays_o[...,2] + rays_d[...,2] * far)))
+            # input()
         # region rays figure
         
         # fig = plt.figure()
@@ -607,10 +645,9 @@ def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
         # plt.show()
         
         # endregion
-        
-        frame_time = torch.empty(H*W).fill_(frame_time)
-        kwargs['do'] = True
-        kwargs['N_samples'] = 16
+    
+        #kwargs['do'] = True --> add do to render_rays parameter list
+        #kwargs['N_samples'] = 16
     else:
         # use provided ray batch
         rays_o, rays_d = rays
@@ -632,6 +669,8 @@ def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1,3]).float()
     rays_d = torch.reshape(rays_d, [-1,3]).float()
+    
+
     
     frame_time = torch.reshape(frame_time, (frame_time.size(dim=0), 1))
     #frame_time = frame_time * torch.ones_like(rays_d[...,:1])
@@ -713,6 +752,8 @@ def config_parser():
                         help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true', 
                         help='use full 5D input instead of 3D')
+    parser.add_argument("--normalize", action='store_true',
+                        help='normalize input pts')
     parser.add_argument("--i_embed", type=int, default=0, 
                         help='set 0 for default positional encoding, -1 for none, 1 for tcnn')
     parser.add_argument("--multires", type=int, default=10, 
@@ -952,26 +993,37 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             rays_rgb = rays_rgb[rand_idx]
         else:
             rays_rgb = torch.Tensor(rays_total).to(device)
-            # Find normalize_factor for mapping pts to unit cube [0;1]
-            norm_min = torch.min(rays_rgb[:,0] + rays_rgb[:,1] * far)
-            norm_max = torch.max(abs(torch.min(rays_rgb[:,0] + rays_rgb[:,1] * far)), torch.max(rays_rgb[:,0] + rays_rgb[:,1] * far)) - norm_min
-            render_kwargs_train['norm_min'] = norm_min
-            render_kwargs_train['norm_max'] = norm_max
-            render_kwargs_test['norm_min'] = norm_min
-            render_kwargs_test['norm_max'] = norm_max
+            #rays_rgb = rays_rgb[:160000]
+            # Normalizing rays to unit cube [0,1] over x,y,z (one-factor)
+            if args.normalize:
+                render_kwargs_test['normalize'] = True
+                norm_min_list = [0.,0.,0.]
+                norm_max_list = [1.,1.,1.]
+                for i in range(3):
+                    norm_min = torch.min(torch.min(rays_rgb[:,0,i] + rays_rgb[:,1,i] * near),torch.min(rays_rgb[:,0,i] + rays_rgb[:,1,i] * far))
+                    rays_rgb[:,0,i] -= norm_min
+                    norm_max = torch.max(torch.max(rays_rgb[:,0,i] + rays_rgb[:,1,i] * near), torch.max(rays_rgb[:,0,i] + rays_rgb[:,1,i] * far))
+                    rays_rgb[:,0,i] /= norm_max
+                    rays_rgb[:,1,i] /= norm_max
+                    norm_min_list[i] = norm_min
+                    norm_max_list[i] = norm_max
+            render_kwargs_test['norm_min'] = norm_min_list
+            render_kwargs_test['norm_max'] = norm_max_list
             # Shuffle rays
+            
+            # print(torch.min(torch.min(rays_rgb[:,0,0] + rays_rgb[:,1,0] * near),torch.min(rays_rgb[:,0,0] + rays_rgb[:,1,0] * far)))
+            # print(torch.min(torch.min(rays_rgb[:,0,1] + rays_rgb[:,1,1] * near),torch.min(rays_rgb[:,0,1] + rays_rgb[:,1,1] * far)))
+            # print(torch.min(torch.min(rays_rgb[:,0,2] + rays_rgb[:,1,2] * near),torch.min(rays_rgb[:,0,2] + rays_rgb[:,1,2] * far)))
+            # print(torch.max(torch.max(rays_rgb[:,0,0] + rays_rgb[:,1,0] * near), torch.max(rays_rgb[:,0,0] + rays_rgb[:,1,0] * far)))
+            # print(torch.max(torch.max(rays_rgb[:,0,1] + rays_rgb[:,1,1] * near), torch.max(rays_rgb[:,0,1] + rays_rgb[:,1,1] * far)))
+            # print(torch.max(torch.max(rays_rgb[:,0,2] + rays_rgb[:,1,2] * near), torch.max(rays_rgb[:,0,2] + rays_rgb[:,1,2] * far)))
+            
             rand_idx = torch.randperm(rays_rgb.shape[0])
             rays_rgb = rays_rgb[rand_idx]
 
     # Summary writers
     writer = SummaryWriter(os.path.join(basedir, 'summaries', expname,
                                         'learn_rate', str(args.lrate)))
-
-    ### Successive training ### 
-    # successive_training = args.successive_training_set
-    # # Make sure number of iterations is enough to work through training set successively instead of random
-    # if N_iters <= args.training_image_frequency * len(i_train) or N_iters <= args.precrop_iters_time:
-    #     successive_training = False
     
     ### Input no. of iterations manually or get from args ###
     #iterations = int(input('\nInput no. of iterations: '))
@@ -980,8 +1032,6 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     
     # Rays per batch
     N_rand = args.N_rand
-    
-    psnr = 0
     
     ### Start of training loop ###
     print('\nBegin')  
@@ -992,6 +1042,38 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         time0 = time.time()
 
         if use_batching:
+            # region print training image
+            ## add -> first_image = rays_rgb[:160_000] before shuffling of rays_rgb
+            ## change chunk to 16000
+            # if i == 4999:
+                
+            #     batch = first_image[:1000]
+            #     batch = torch.transpose(batch, 0,1)
+            #     batch_rays, frame_time = batch[:2,...,:3],batch[1,...,3]
+            #     with torch.no_grad():
+            #         rendered, disp, acc, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays, frame_time=frame_time,
+            #                                     verbose=i < 10, retraw=True,
+            #                                     **render_kwargs_train)
+
+            #     i_batch=1000
+            #     for y in range(159):
+            #         batch = first_image[i_batch:i_batch+1000]
+            #         batch = torch.transpose(batch, 0,1)
+            #         batch_rays, frame_time = batch[:2,...,:3],batch[1,...,3]
+            #         i_batch += 1000
+
+            #         with torch.no_grad():
+            #             rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays, frame_time=frame_time,
+            #                                     verbose=i < 10, retraw=True,
+            #                                     **render_kwargs_train)
+
+            #         rendered = torch.cat([rendered, rgb], dim=0)
+
+            #     rendered = rendered.reshape(400,400,3)
+            #     plt.imshow(rendered.cpu())
+            #     plt.show()
+            # endregion
+            
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
@@ -1004,29 +1086,16 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
             
-            # if args.successive_training_set and i==N_add_iter:
-            #     N_rays_added = H*W * N_add
-            #     rays_rgb = torch.cat([rays_rgb, rays_total[:N_rays_added]])
-            #     rays_total = rays_total[N_rays_added:]
-
-            #     # Add more images on iteration i + N if possible
-            #     N_add += 2
-            #     if rays_total.shape[0] >= H*W * N_add:
-            #         N_add_iter += 150
-
-            #     print(f"{N_add} training images added. Shuffling")
+            # region successive training
+            ## add psnr = 0 before loop
+            # if args.successive_training_set and psnr >= 20.:
+            #     rays_rgb = torch.cat([rays_rgb, rays_total[:H*W]], 0)
+            #     rays_total = rays_total[H*W:]
             #     rand_idx = torch.randperm(rays_rgb.shape[0])
             #     rays_rgb = rays_rgb[rand_idx]
-                
             #     i_batch = 0
-            
-            if args.successive_training_set and psnr >= 20.:
-                rays_rgb = torch.cat([rays_rgb, rays_total[:H*W]], 0)
-                rays_total = rays_total[H*W:]
-                rand_idx = torch.randperm(rays_rgb.shape[0])
-                rays_rgb = rays_rgb[rand_idx]
-                i_batch = 0
-                print('Training image added. Shuffled.')
+            #     print('Training image added. Shuffled.')
+            # endregion
                 
         else:
             # Select Training Example Random from one image
@@ -1282,11 +1351,11 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         if i%args.i_testset==0:
             #torch.cuda.empty_cache()
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
-            print('Testing poses shape...', poses[i_train[:args.testset_size]].shape)
+            print('Testing poses shape...', poses[i_test[62:64]].shape)
 
             with torch.no_grad():
-                render_path(torch.Tensor(poses[i_train[:args.testset_size]]).to(device), torch.Tensor(times[i_train[:args.testset_size]]).to(device),
-                            hwf, 256*64, render_kwargs_test, gt_imgs=images[i_train[:args.testset_size]], savedir=testsavedir)
+                render_path(torch.Tensor(poses[i_test[62:64]]).to(device), torch.Tensor(times[i_test[62:64]]).to(device),
+                            hwf, 256*64, render_kwargs_test, gt_imgs=images[i_test[62:64]], savedir=testsavedir)
             print('Saved test set')
             
         if DEBUG > 1:
