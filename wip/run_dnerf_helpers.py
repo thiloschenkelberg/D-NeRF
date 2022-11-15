@@ -107,6 +107,7 @@ class FastTemporalNeRF(nn.Module):
         self.lrate=lrate
         self.zero_canonical=zero_canonical
         self.debug=debug
+        self.count=1
         #self.skips=[4]
         self._is_initialized=False
         self.dx_net, self.density_net, self.rgb_net, self.pts_encode, self.t_encode = self.create_grid_model()
@@ -122,6 +123,18 @@ class FastTemporalNeRF(nn.Module):
 
         self._is_initialized = True
         return dx_net, density_net, rgb_net, pts_encode, t_encode
+    
+    # def create_time_net(self):
+    #     layers = [nn.Linear(60 + 20, 256)]
+    #     for i in range(7):
+    #         layer = nn.Linear
+
+    #         in_channels = 256
+    #         if i in self.skips:
+    #             in_channels += 60
+
+    #         layers += [layer(in_channels, 256)]
+    #     return nn.ModuleList(layers), nn.Linear(256, 3)
 
     # Return params for all networks and encoding (if trainable)
     def get_model_params(self):
@@ -139,6 +152,16 @@ class FastTemporalNeRF(nn.Module):
                                   {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
                                   {'params': self.pts_encode.parameters()}
                                  ], lr=self.lrate, eps=1e-15, betas=(0.9, 0.99))
+        
+    # def query_time(self, pts, t, net, net_final):
+    #     h = torch.cat([pts, t], dim=-1)
+    #     for i, l in enumerate(net):
+    #         h = net[i](h)
+    #         h = F.relu(h)
+    #         if i in self.skips:
+    #             h = torch.cat([pts, h], -1)
+
+    #     return net_final(h)
     
     # Forward propagation
     def forward(self, x, t):
@@ -149,34 +172,77 @@ class FastTemporalNeRF(nn.Module):
         # Should only skip dx_net if frame_times (t) of all pts are 0. which is 'never' the
         # case for batched training
         cur_time = t[0,0] if len(torch.unique(t))==1 else 1
+            
+        if self.debug > 2:
+            # Save tensors to file in ./test/
+            i_pts = input_pts.cpu()
+            i_views = input_views.cpu()
+            i_time = t.cpu()
+            np.savetxt('./test/input_pts.txt', i_pts.numpy())
+            np.savetxt('./test/input_views.txt', i_views.numpy())
+            np.savetxt('./test/time.txt', i_time.numpy())
         
         ### TODO: check if using dx_net 
-        # in all cases is possible/effective <--- violates D-NeRF paper
+        # in all cases is possible/effective <--- violates D-NeRF paper,
         # enforcing dx to be the nullvector in case time is 0
         input_pts_encoded = self.pts_encode(input_pts)
         
         #cur_time = 0.
         if cur_time == 0. and self.zero_canonical:
             # No positional delta at t = 0
+            # if canonical space is also at t = 0
             dx_out = torch.zeros_like(input_pts)
             density_in = input_pts_encoded
         else:
             # Encode time input and concatenate to original time input
+            #time_encoded = torch.cat([t, self.t_encode(t)], dim=-1)
             time_encoded = self.t_encode(t)
             # Concatenate encoded input pts with encoded time
             dx_in = torch.cat([input_pts_encoded, time_encoded], dim=-1)
             # Use dx_net
             dx_out = self.dx_net(dx_in)
-            # Add displacement vector
             density_in = input_pts_encoded + dx_out
         # Use density_net
         density_out = self.density_net(density_in)
+        #input()
         # Concatenate density_net output (16) with views (3) 
         rgb_in = torch.cat([density_out, input_views], dim=-1)
         # Use color_net (16+3in, 3out) internally encoded to density(16) + view(16) = 32in
         rgb_out = self.rgb_net(rgb_in)
         # Concatenate color_out with first output value of density_net
         rgba = torch.cat([rgb_out, density_out[...,:1]], dim=-1)
+        # if self.count%800==0 or self.count==1:
+        #     print(dx_out[:8])
+        #     print(dx_out[:6])
+
+        self.count+=1
+        
+        if self.debug > 1:
+            # Log tensor shapes
+            print('\nforward()',
+                  '\ninput_views shape: ', input_views.shape)
+            if cur_time != 0. and self.zero_canonical:
+                print('dx in shape: ', dx_in.shape)
+            print('density in shape: ', density_in.shape,
+                  '\nrgb in shape: ', rgb_in.shape)
+            
+            if self.debug > 2:
+            # Save tensors to file in ./test/
+                if cur_time != 0. and self.zero_canonical:
+                    i_dx = dx_in.cpu()
+                    np.savetxt('./test/dx_in.txt', i_dx.numpy())
+                    o_dx = dx_out.cpu()
+                    np.savetxt('./test/dx_out.txt', o_dx.numpy())
+                i_dense = density_in.cpu()
+                np.savetxt('./test/density_in.txt', i_dense.numpy())
+                o_dense = density_out.cpu()
+                np.savetxt('./test/density_out.txt', o_dense.numpy())
+                i_rgb = rgb_in.cpu()
+                np.savetxt('./test/rgb_in.txt', i_rgb.numpy())
+                o_rgb = rgb_out.cpu()
+                np.savetxt('./test/rgb_out.txt', o_rgb.numpy())
+                o_rgba = rgba.cpu()
+                np.savetxt('./test/rgba_out.txt', o_rgba.numpy())
         
         dx_out = torch.zeros_like(input_pts)
         return rgba,dx_out

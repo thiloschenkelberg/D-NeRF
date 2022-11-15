@@ -1,29 +1,44 @@
-expname =
+expname = lego2
 basedir = ./logs
-datadir = ./data/
+datadir = ./data/lego2
 dataset_type = blender
 
 nerf_type = fast_temporal
-no_batching = True
+no_batching = False
 not_zero_canonical = False
-use_viewdirs = True
+perturb = 1.0
+normalize = True
 
 use_viewdirs = True
-white_bkgd = 
-lrate = 0.01
-lrate_decay = 500
+white_bkgd = True
 
-N_iter = 1000
-N_samples = 64
-N_importance = 128
-N_rand = 4096
+lrate = 1e-2
+lrate_decay = 500000
+
+N_iter = 10000
+N_samples = 128
+N_importance = 384
+N_rand = 2048
 testskip = 1
 
-precrop_iters = 50
-precrop_iters_time = 500
+i_print = 100
+i_img = 1000000
+i_weights = 1000000
+i_video = 1000000
+i_testset = 10000
+testset_size = 3
+
+
+precrop_iters = 0
+precrop_iters_time = 0
 precrop_frac = 0.5
+
+curriculum_training_set = False
+training_image_frequency = 10
 
 half_res = True
 do_half_precision = False
 
 use_ckpts = False
+
+

@@ -46,6 +46,38 @@
 			}
 		]
 	},
+	"f_encoding_c": {
+		"otype": "Composite",
+		"nested": [
+			{
+				"n_dims_to_encode": 256,
+				"otype": "Identity"
+			},
+			{
+				"otype": "Frequency",
+				"n_frequencies": 10
+			}
+		]
+	},
+	"dx_encoding": {
+		"otype": "Composite",
+		"nested": [
+			{
+				"n_dims_to_encode": 32,
+				"otype": "Identity"
+			},
+			{
+				"n_dims_to_encode": 2,
+				"otype": "Grid",
+				"type": "Hash",
+				"n_levels": 16,
+				"n_features_per_level": 2,
+				"log2_hashmap_size": 19,
+				"base_resolution": 16,
+				"per_level_scale": 1.5
+			}
+		]
+	},
 	"cutlass_one": {
 		"otype": "CutlassMLP",
 		"activation": "ReLU",
@@ -59,5 +91,19 @@
 		"output_activation": "None",
 		"n_neurons": 64,
 		"n_hidden_layers": 2
+	},
+	"cutlass_three": {
+		"otype": "CutlassMLP",
+		"activation": "ReLU",
+		"output_activation": "None",
+		"n_neurons": 64,
+		"n_hidden_layers": 1
+	},
+	"cutlass_four": {
+		"otype": "CutlassMLP",
+		"activation": "ReLU",
+		"output_activation": "None",
+		"n_neurons": 64,
+		"n_hidden_layers": 4
 	}
 }

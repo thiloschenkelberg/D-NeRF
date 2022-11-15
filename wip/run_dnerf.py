@@ -133,13 +133,18 @@ def create_tcnn_nerf(args):
     assert type(model) is FastTemporalNeRF, "Wrong nerf type in args."
 
     ### Adam optimizer
+    # Optionally get model parameters including L2 regularization on networks
+    # grad_vars = model.get_model_params()
+    # grad_vars = model.parameters()
+    # optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, eps=1e-15, betas=(0.9,0.999))\
+    # optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9,0.999))
     optimizer = model.get_optimizer()
     if DEBUG > 0:
         print(optimizer.param_groups)
 
     ### Optionally use torch L2-loss
-    loss = None
-    #loss = nn.MSELoss()
+    #loss = None
+    loss = nn.MSELoss()
     
     # Build network shortcut lambda function
     # really only shortcuts passing of netchunk size, but is consistent with original implementation
@@ -204,6 +209,11 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
     outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_time)
+    if DEBUG > 1:
+        print('\nrun_network()\nembedded shape: ', embedded.shape,
+              '\nembedded_time shape: ', embedded_time.shape,
+              '\noutputs_flat shape: ', outputs_flat.shape,
+              '\nposition_delta_flat shape: ', position_delta_flat.shape)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
     return outputs, position_delta
@@ -227,6 +237,11 @@ def run_tcnn_network(inputs, viewdirs, frame_time, fn, netchunk=256*64):
     # Batchified input to models
     # get rgba output and position delta
     outputs_flat, position_delta_flat = batchify(fn, netchunk)(inputs_flat, input_frame_times_flat)
+    if DEBUG > 1:
+        print('\nrun_tcnn_network()\ninputs_flat shape: ', inputs_flat.shape,
+              '\ninput_frame_time_flat shape: ', input_frame_time_flat.shape,
+              '\noutputs_flat shape: ', outputs_flat.shape,
+              '\nposition_delta_flat shape: ', position_delta_flat.shape)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
     return outputs, position_delta
@@ -437,6 +452,38 @@ def render_rays(ray_batch,
     # Get N_samples pts along ray (eg. 64)
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
     
+    # region plot pts
+    
+    #print(rays_d)
+    
+    # fig = plt.figure()
+    # ax = fig.add_subplot(projection='3d')
+    # # xs0 = rays_o[...,0].cpu()
+    # # ys0 = rays_o[...,1].cpu()
+    # # zs0 = rays_o[...,2].cpu()
+    # # xs = np.concatenate([xs0, (xs0 + rays_d[...,0].cpu())], 0)
+    # # ys = np.concatenate([ys0, (ys0 + rays_d[...,1].cpu())], 0)
+    # # zs = np.concatenate([zs0, (zs0 + rays_d[...,2].cpu())], 0)
+    # xs = pts[...,0].cpu()
+    # print(pts[...,0].shape)
+    # ys = pts[...,1].cpu()
+    # zs = pts[...,2].cpu()
+    # ax.scatter(xs, ys, zs, marker='x', color='black')
+    # for i in range(rays_o.shape[0]):
+    #     ax.arrow3D(xs[i,0],
+    #                ys[i,0],
+    #                zs[i,0],
+    #                rays_d[i,0].cpu()*4,
+    #                rays_d[i,1].cpu()*4,
+    #                rays_d[i,2].cpu()*4,
+    #                mutation_scale=10, arrowstyle="-|>", linestyle='-', color='black')
+    # ax.set_xlim(0,1)
+    # ax.set_ylim(0,1)
+    # ax.set_zlim(0,1)
+    # plt.show()
+    
+    # endregion
+    
     if N_importance > 0: # Two sampling passes (N_samples then N_samples + N_importance)
         if use_two_models_for_fine:
             raw, position_delta_0 = network_query_fn(pts, viewdirs, frame_time, network_fn)
@@ -456,6 +503,15 @@ def render_rays(ray_batch,
 
     raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
     rgb_map, disp_map, acc_map, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    
+    #region show image
+    
+    # if do:
+    #     rgb = rgb_map.reshape(40,400,3).cpu()
+    #     print(rgb)
+    #     plt.imshow(rgb)
+
+    # endregion
 
     if DEBUG > 1:
         print('\nrender_rays()\npts shape: ', pts.shape,
@@ -536,6 +592,20 @@ def render(H, W, focal, chunk=256*64, rays=None, c2w=None, ndc=True,
                 
             rays_o = rays_o_temp
             rays_d = rays_d_temp
+        # region rays figure
+        
+        # fig = plt.figure()
+        # ax = fig.add_subplot(projection='3d')
+        # xs0 = rays_o[...,0].cpu()
+        # ys0 = rays_o[...,1].cpu()
+        # zs0 = rays_o[...,2].cpu()
+        # xs = np.concatenate([xs0, (xs0 + rays_d[...,0].cpu())], 0)
+        # ys = np.concatenate([ys0, (ys0 + rays_d[...,1].cpu())], 0)
+        # zs = np.concatenate([zs0, (zs0 + rays_d[...,2].cpu())], 0)
+        # ax.scatter(xs, ys, zs, marker='x')
+        # plt.show()
+        
+        # endregion
     
     else:
         # use provided ray batch
@@ -666,7 +736,7 @@ def config_parser():
                         help='number of steps to train on central time')
     parser.add_argument("--precrop_frac", type=float,
                         default=.5, help='fraction of img taken for central crops')
-    parser.add_argument("--curriculum_training_set", action="store_true",
+    parser.add_argument("--successive_training_set", action="store_true",
                         help='train images in strict succession')
     parser.add_argument("--training_image_frequency", type=int, default=1,
                         help='number of training steps per image when training images in strict succession')
@@ -729,6 +799,18 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     if args.dataset_type == 'blender':
         images, poses, times, render_poses, render_times, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
         i_train, i_val, i_test = i_split
+        
+        if DEBUG > 0: 
+            print('\nLoaded blender data:',
+                  '\nimages: ', type(images), images.shape,
+                  '\nposes: ', type(poses), poses.shape,
+                  '\ntimes: ', type(times), times.shape,
+                  '\nrender_poses: ', type(render_poses), render_poses.shape,
+                  '\nrender_times: ', type(render_times), render_times.shape,
+                  '\nheight: ', hwf[0], ' width: ', hwf[1], ' focal: ', hwf[2],
+                  '\ni_train: ', i_split[0].shape,
+                  ' i_val: ', i_split[1].shape,
+                  ' i_test: ', i_split[2].shape,'\n')
         
         # near and far plane
         near = 2.
@@ -841,9 +923,11 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     poses = torch.Tensor(poses).to(device)
     times = torch.Tensor(times).to(device)
     if use_batching or not use_batching:
-        if args.curriculum_training_set:
+        if args.successive_training_set:
             rays_rgb = torch.Tensor(rays_total).to(device)
-            # Normalizing rays to unit cube [0,1] over x,y,z (one-factor)
+            # Normalize viewdirs to unit vectors (unit sphere)
+            #rays_rgb[:,1] = torch.nn.functional.normalize(rays_rgb[:,1])
+            # Find normalize_factor for mapping pts to unit cube [-1;1]
             if args.normalize:
                 render_kwargs_test['normalize'] = True
                 norm_min_list = [0.,0.,0.]
@@ -896,7 +980,10 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
             rays_rgb = rays_rgb[rand_idx]
 
     # Summary writers
-    writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
+    #writer = SummaryWriter(os.path.join(basedir, 'summaries', expname,
+    #                                    'learn_rate', str(args.lrate)))
+    
+    writer = SummaryWriter(os.path.join(basedir, 'summaries', expname, 'tcnntest2', expname))
     
     ### Input no. of iterations manually or get from args ###
     #iterations = int(input('\nInput no. of iterations: '))
@@ -905,6 +992,8 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
     
     # Rays per batch
     N_rand = args.N_rand
+    
+    
     
     ### Start of training loop ###
     print('\nBegin')  
@@ -915,6 +1004,38 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         time0 = time.time()
 
         if use_batching:
+            # region print training image
+            ## add -> first_image = rays_rgb[:160_000] before shuffling of rays_rgb
+            ## change chunk to 16000
+            # if i == 4999:
+                
+            #     batch = first_image[:1000]
+            #     batch = torch.transpose(batch, 0,1)
+            #     batch_rays, frame_time = batch[:2,...,:3],batch[1,...,3]
+            #     with torch.no_grad():
+            #         rendered, disp, acc, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays, frame_time=frame_time,
+            #                                     verbose=i < 10, retraw=True,
+            #                                     **render_kwargs_train)
+
+            #     i_batch=1000
+            #     for y in range(159):
+            #         batch = first_image[i_batch:i_batch+1000]
+            #         batch = torch.transpose(batch, 0,1)
+            #         batch_rays, frame_time = batch[:2,...,:3],batch[1,...,3]
+            #         i_batch += 1000
+
+            #         with torch.no_grad():
+            #             rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays, frame_time=frame_time,
+            #                                     verbose=i < 10, retraw=True,
+            #                                     **render_kwargs_train)
+
+            #         rendered = torch.cat([rendered, rgb], dim=0)
+
+            #     rendered = rendered.reshape(400,400,3)
+            #     plt.imshow(rendered.cpu())
+            #     plt.show()
+            # endregion
+            
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
@@ -927,16 +1048,17 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
             
-            # region curriculum training
+            # region successive training
+            ## add psnr = 0 before loop
             
-            if args.curriculum_training_set:
-                if i%10 == 0:
-                    if rays_total.shape[0] > 0:
-                        rays_rgb = torch.cat([rays_rgb, rays_total[:H*W]], 0)
-                        rays_total = rays_total[H*W:]
-                        rand_idx = torch.randperm(rays_rgb.shape[0])
-                        rays_rgb = rays_rgb[rand_idx]
-                        i_batch = 0
+            # if args.successive_training_set:
+            #     if i%10 == 0:
+            #         if rays_total.shape[0] > 0:
+            #             rays_rgb = torch.cat([rays_rgb, rays_total[:H*W]], 0)
+            #             rays_total = rays_total[H*W:]
+            #             rand_idx = torch.randperm(rays_rgb.shape[0])
+            #             rays_rgb = rays_rgb[rand_idx]
+            #             i_batch = 0
             # endregion
                 
         else:
@@ -1040,7 +1162,7 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         optimizer.zero_grad(True)
         
         ## Torch vs Self-implemented L2-loss calculation
-        # when using Torch version uncomment "loss=.." in create_nerf() / create_tcnn_nerf()
+        # when using Torch version uncomment in create_nerf() / create_tcnn_nerf()
         #output = loss(rgb, target_s)
         output = img2mse(rgb, target_s)
         #output = output + tv_loss
@@ -1056,10 +1178,12 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
                 scaled_loss.backward()
         else:
             output.backward()
+        
+        #plot_grad_flow(model.named_parameters())
 
         optimizer.step()
 
-        # NOTE: IMPORTANT! <-- UPDATE LEARN RATE WITH D-NERF
+        # NOTE: IMPORTANT!
         ###   update learning rate   ###
         # learn rate will decay by decay factor 
         # decay_factor = 0.1
@@ -1166,11 +1290,11 @@ def train(): # python3 run_dnerf.py --config configs/config.txt
         if i%args.i_testset==0:
             #torch.cuda.empty_cache()
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
-            print('Testing poses shape...', poses[i_test].shape)
+            print('Testing poses shape...', poses[i_test[[4,9,16]]].shape)
 
             with torch.no_grad():
-                render_path(torch.Tensor(poses[i_test]).to(device), torch.Tensor(times[i_test]).to(device),
-                            hwf, 128*32, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                render_path(torch.Tensor(poses[i_test[[4,9,16]]]).to(device), torch.Tensor(times[i_test[[4,9,16]]]).to(device),
+                            hwf, 128*32, render_kwargs_test, gt_imgs=images[i_test[[4,9,16]]], savedir=testsavedir)
             print('Saved test set')
             
         if DEBUG > 1:
