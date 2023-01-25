@@ -1,5 +1,6 @@
-### D-NeRF with [[Tiny Cuda Neural Network]](https://github.com/NVlabs/tiny-cuda-nn) and [[Multiresolution Hash Encoding]](https://nvlabs.github.io/instant-ngp/).
+# D-NeRF with [[Tiny Cuda Neural Network]](https://github.com/NVlabs/tiny-cuda-nn) and [[Multiresolution Hash Encoding]](https://nvlabs.github.io/instant-ngp/).
 
+---
 
 <img src='https://www.albertpumarola.com/images/2021/D-NeRF/teaser2.gif' align="right" width=400>
 
