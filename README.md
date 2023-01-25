@@ -80,3 +80,74 @@ If you use this code or ideas from the paper for your research, please cite our 
 ## Tiny CUDA Neural Networks ![](https://github.com/NVlabs/tiny-cuda-nn/workflows/CI/badge.svg)
 
 This is a small, self-contained framework for training and querying neural networks. Most notably, it contains a lightning fast ["fully fused" multi-layer perceptron](https://raw.githubusercontent.com/NVlabs/tiny-cuda-nn/master/data/readme/fully-fused-mlp-diagram.png) ([technical paper](https://tom94.net/data/publications/mueller21realtime/mueller21realtime.pdf)), a versatile [multiresolution hash encoding](https://raw.githubusercontent.com/NVlabs/tiny-cuda-nn/master/data/readme/multiresolution-hash-encoding-diagram.png) ([technical paper](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf)), as well as support for various other input encodings, losses, and optimizers.
+
+### Usage
+
+Tiny CUDA neural networks have a simple C++/CUDA API:
+
+```cpp
+#include <tiny-cuda-nn/common.h>
+
+// Configure the model
+nlohmann::json config = {
+	{"loss", {
+		{"otype", "L2"}
+	}},
+	{"optimizer", {
+		{"otype", "Adam"},
+		{"learning_rate", 1e-3},
+	}},
+	{"encoding", {
+		{"otype", "HashGrid"},
+		{"n_levels", 16},
+		{"n_features_per_level", 2},
+		{"log2_hashmap_size", 19},
+		{"base_resolution", 16},
+		{"per_level_scale", 2.0},
+	}},
+	{"network", {
+		{"otype", "FullyFusedMLP"},
+		{"activation", "ReLU"},
+		{"output_activation", "None"},
+		{"n_neurons", 64},
+		{"n_hidden_layers", 2},
+	}},
+};
+
+using namespace tcnn;
+
+auto model = create_from_config(n_input_dims, n_output_dims, config);
+
+// Train the model
+GPUMatrix<float> training_batch_inputs(n_input_dims, batch_size);
+GPUMatrix<float> training_batch_targets(n_output_dims, batch_size);
+
+for (int i = 0; i < n_training_steps; ++i) {
+	generate_training_batch(&training_batch_inputs, &training_batch_targets); // <-- your code
+
+	float loss;
+	model.trainer->training_step(training_batch_inputs, training_batch_targets, &loss);
+	std::cout << "iteration=" << i << " loss=" << loss << std::endl;
+}
+
+// Use the model
+GPUMatrix<float> inference_inputs(n_input_dims, batch_size);
+generate_inputs(&inference_inputs); // <-- your code
+
+GPUMatrix<float> inference_outputs(n_output_dims, batch_size);
+model.network->inference(inference_inputs, inference_outputs);
+```
+
+### License and Citation
+
+This framework is licensed under the BSD 3-clause license. Please see `LICENSE.txt` for details.
+
+If you use it in your research, we would appreciate a citation via
+```bibtex
+@misc{tiny-cuda-nn,
+    Author = {Thomas M\"uller},
+    Year = {2021},
+    Note = {https://github.com/nvlabs/tiny-cuda-nn},
+    Title = {Tiny {CUDA} Neural Network Framework}
+}
+```
