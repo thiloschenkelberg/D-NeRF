@@ -135,10 +135,10 @@ class FastTemporalNeRF(nn.Module):
     def get_optimizer(self):
         assert self._is_initialized is True, 'Model has not been initialized.'
         return torch.optim.Adam([{'params': self.dx_net.parameters(), 'weight_decay': 1e-6},
-                                  {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
-                                  {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
-                                  {'params': self.pts_encode.parameters()}
-                                 ], lr=self.lrate, eps=1e-15, betas=(0.9, 0.99))
+                                 {'params': self.density_net.parameters(), 'weight_decay': 1e-6},
+                                 {'params': self.rgb_net.parameters(), 'weight_decay': 1e-6},
+                                 {'params': self.pts_encode.parameters()}
+                                ], lr=self.lrate, eps=1e-15, betas=(0.9, 0.99))
     
     # Forward propagation
     def forward(self, x, t):
